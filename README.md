@@ -15,3 +15,5 @@ Project to use XGO Robot Kit with computer vision / neural networks to create a 
 * Initially, we believed due to admin updates we would be able to ssh into the server. However, upon trying, ssh connection still failed. After trying to connect to the hotspot again, we noticed that the hotspot was not being detected at all by the robot -- in retrospect, this could have been because the hotspot was not on 2.4 GHz. This led us to try and use Tailscale to connect. Tailscale would enable us to the ssh into the robot and get around the school's network restrictions.
 
 # 9/18
+
+Tailscale has been successfully set up as the way to get the robot connected to our laptops. The robot has tailscale login credentials on disk, and on initialization connects to the tailnet. The tailnet has also been scoped for isolation (so the robot can only access allowed devices / ip addresses on the tailnet). Additionally, ssh now works directly between my laptop and pi@[Tailscale-Robot-IP-Address]. A test script was ran (successfully) on the XGO Robot Kit that streamed the camera feed to an .avi on disk
