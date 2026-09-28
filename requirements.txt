@@ -1,0 +1,2 @@
+# XGO Lite movement test (also installs pyserial)
+xgolib==1.1.10

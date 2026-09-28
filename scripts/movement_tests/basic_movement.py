@@ -1,46 +1,98 @@
-"""Short movement test for the XGO Lite on its Raspberry Pi controller.
+"""Run short, explicitly selected XGO Lite movements from the command line."""
 
-From the repository root on the robot, run:
-    python3 scripts/movement_tests/basic_movement.py
-
-If the built-in menu owns the serial port, stop it first (e.g. sudo pkill -f main.py).
-Place the robot on a clear, level floor; Ctrl+C stops the test.
-"""
-
+import argparse
+import math
 import time
+from importlib import import_module
 
-from xgolib import XGO  # type: ignore[import-not-found]  # installed on the robot
-
-DURATION = 1.0  # seconds per movement
-PAUSE = 0.5     # seconds at rest between movements
+MOVEMENTS = ("forward", "backward", "left", "right", "turn-left", "turn-right")
 
 
-def main():
-    input("Clear the area around the robot. Press Enter to start (Ctrl+C to cancel)... ")
-    dog = XGO(port="/dev/ttyAMA0", version="xgolite")
-
+def bounded_number(value, *, minimum, maximum, label):
     try:
-        # Lite ranges: x step +/-25, y step +/-18, rotation +/-150 degrees/s.
-        steps = [
-            ("forward", dog.move_x, 10),
-            ("backward", dog.move_x, -10),
-            ("left sidestep", dog.move_y, 8),
-            ("right sidestep", dog.move_y, -8),
-            ("turn left", dog.turn, 30),
-            ("turn right", dog.turn, -30),
-        ]
-        for label, command, value in steps:
-            print(f"Testing {label}...")
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{label} must be a number") from exc
+    if not math.isfinite(number) or not minimum <= number <= maximum:
+        raise argparse.ArgumentTypeError(f"{label} must be between {minimum} and {maximum}")
+    return number
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--movement", action="append", required=True, choices=(*MOVEMENTS, "all"),
+        help="movement to test; repeat the flag to run multiple in order, or use 'all'",
+    )
+    parser.add_argument(
+        "--duration", type=lambda v: bounded_number(v, minimum=0.1, maximum=5, label="duration"),
+        default=1.0, metavar="SECONDS", help="time per movement (0.1–5; default: 1)",
+    )
+    parser.add_argument(
+        "--pause", type=lambda v: bounded_number(v, minimum=0, maximum=60, label="pause"),
+        default=0.5, metavar="SECONDS", help="rest between movements (0–60; default: 0.5)",
+    )
+    for flag, maximum, default, unit in (
+        ("x-step", 25, 10, "mm"),
+        ("y-step", 18, 8, "mm"),
+        ("turn-speed", 100, 30, "degrees/s"),
+    ):
+        parser.add_argument(
+            f"--{flag}", type=lambda v, m=maximum, name=flag: bounded_number(
+                v, minimum=1, maximum=m, label=name
+            ),
+            default=default, metavar="VALUE",
+            help=f"{flag} magnitude (1–{maximum} {unit}; default: {default})",
+        )
+    parser.add_argument("--port", default="/dev/ttyAMA0", help="serial port (default: /dev/ttyAMA0)")
+    parser.add_argument("--yes", action="store_true", help="skip the safety confirmation prompt")
+    return parser
+
+
+def run_test(dog, args):
+    commands = {
+        "forward": (dog.move_x, args.x_step),
+        "backward": (dog.move_x, -args.x_step),
+        "left": (dog.move_y, args.y_step),
+        "right": (dog.move_y, -args.y_step),
+        "turn-left": (dog.turn, args.turn_speed),
+        "turn-right": (dog.turn, -args.turn_speed),
+    }
+    selected = MOVEMENTS if args.movement == ["all"] else args.movement
+    try:
+        for index, name in enumerate(selected):
+            command, value = commands[name]
+            print(f"Testing {name}...")
             try:
                 command(value)
-                time.sleep(DURATION)
+                time.sleep(args.duration)
             finally:
-                dog.stop()  # motion commands persist until stopped
-            time.sleep(PAUSE)
+                dog.stop()  # movement commands persist until explicitly stopped
+            if index < len(selected) - 1:
+                time.sleep(args.pause)
     finally:
-        dog.stop()  # also stop on Ctrl+C or an error
-
+        dog.stop()  # stop on Ctrl+C or errors, too
     print("Movement test complete.")
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if "all" in args.movement and len(args.movement) != 1:
+        parser.error("'all' cannot be combined with other movements")
+    try:
+        xgolib = import_module("xgolib")
+    except ImportError:
+        parser.exit(2, "xgolib is missing; run ./setup.sh and use .venv/bin/python.\n")
+
+    if not args.yes:
+        try:
+            input("Clear a level area around the robot. Press Enter to start (Ctrl+C to cancel)... ")
+        except EOFError:
+            parser.error("confirmation requires a terminal; use --yes only when it is safe")
+
+    dog = xgolib.XGO(port=args.port, version="xgolite")
+    run_test(dog, args)
 
 
 if __name__ == "__main__":
