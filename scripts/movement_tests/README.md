@@ -13,7 +13,7 @@ From the repository root on the **XGO Lite's Raspberry Pi**, with Python 3 (3.8+
 .venv/bin/python scripts/movement_tests/basic_movement.py --help
 ```
 
-`setup.sh` creates `.venv/` and installs `requirements.txt` (`xgolib` and its `pyserial` dependency). It is safe to rerun. If `python3 -m venv` is unavailable on Raspberry Pi OS, install `python3-venv` first. Alternatively, activate with `source .venv/bin/activate` and use `python3` in place of `.venv/bin/python`. The robot's preinstalled `xgolib` may also work with system Python, but this setup provides a reproducible environment. This script requires access to `/dev/ttyAMA0` (or specify `--port`); if the built-in menu is using the serial port, stop that process before testing.
+`setup.sh` creates `.venv/` and installs `requirements.txt` (`xgolib`/`pyserial` for movement and headless OpenCV for the separate camera-only box detector). It is safe to rerun. If `python3 -m venv` is unavailable on Raspberry Pi OS, install `python3-venv` first. Alternatively, activate with `source .venv/bin/activate` and use `python3` in place of `.venv/bin/python`. The robot's preinstalled `xgolib` may also work with system Python, but this setup provides a reproducible environment. This script requires access to `/dev/ttyAMA0` (or specify `--port`); if the built-in menu is using the serial port, stop that process before testing.
 
 **Clear a level area** and keep the robot away from edges before proceeding. Example commands from the repository root:
 
