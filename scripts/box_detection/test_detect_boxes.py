@@ -76,6 +76,31 @@ class BoxDetectionTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["observed_order"], [])
         camera.release.assert_called_once()
 
+    def test_single_color_flag_selects_target_without_other_boxes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            image = Path(folder) / "orange.png"
+            self.assertTrue(cv2.imwrite(str(image), scene(["orange"])))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = detect_boxes.main(["--color", "orange", "--source", str(image)])
+            report = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(report["status"], "ready")
+            self.assertEqual(report["target"]["color"], "orange")
+            self.assertIn("no arm", report["note"])
+
+    def test_duplicate_color_is_ambiguous_in_single_color_mode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            image = Path(folder) / "duplicate.png"
+            self.assertTrue(cv2.imwrite(str(image), scene(duplicate_purple=True)))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = detect_boxes.main(["--color", "purple", "--source", str(image)])
+            report = json.loads(output.getvalue())
+            self.assertEqual(code, 2)
+            self.assertEqual(report["status"], "ambiguous")
+            self.assertIsNone(report["target"])
+
     def test_duplicate_order_is_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
             detect_boxes.main(["--order", "purple", "purple", "orange", "--source", "missing.png"])

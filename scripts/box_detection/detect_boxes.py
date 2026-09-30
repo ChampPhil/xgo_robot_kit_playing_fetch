@@ -9,7 +9,7 @@ import numpy as np  # type: ignore[import-not-found]
 
 # OpenCV H is 0–179; S and V are 0–255. Tune these on actual robot-camera frames.
 HSV_RANGES = {
-    "purple": ((125, 65, 60), (160, 255, 255)),
+    "purple": ((115, 75, 35), (150, 255, 255)),
     "orange": ((5, 90, 90), (25, 255, 255)),
     "light-blue": ((85, 55, 80), (110, 255, 255)),
 }
@@ -29,9 +29,13 @@ def positive_int(value):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--order", nargs=3, required=True, choices=tuple(HSV_RANGES), metavar="COLOR",
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument(
+        "--order", nargs=3, choices=tuple(HSV_RANGES), metavar="COLOR",
         help="three different colors, bottom to top: purple orange light-blue (any order)",
+    )
+    selection.add_argument(
+        "--color", choices=tuple(HSV_RANGES), help="find one requested box by color (no robot motion)",
     )
     parser.add_argument(
         "--source", default="0", metavar="CAMERA_OR_PATH",
@@ -90,6 +94,18 @@ def evaluate(detections, order):
     }
 
 
+def evaluate_color(detections, color):
+    candidates = detections[color]
+    status = "missing" if not candidates else "ambiguous" if len(candidates) > 1 else "ready"
+    return {
+        "color": color,
+        "status": status,
+        "target": {"color": color, **candidates[0]} if status == "ready" else None,
+        "detections": {color: candidates},
+        "note": "Image pixels only; no arm, gripper, or locomotion commands are sent.",
+    }
+
+
 def annotate(frame, detections):
     annotated = frame.copy()
     for color, candidates in detections.items():
@@ -106,7 +122,7 @@ def annotate(frame, detections):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    if len(set(args.order)) != 3:
+    if args.order is not None and len(set(args.order)) != 3:
         parser.error("--order must list each color exactly once")
     if args.source.isdecimal():
         try:
@@ -144,7 +160,7 @@ def main(argv=None):
                     break
             last_frame = frame
             detections = detect_boxes(frame, args.min_area)
-            result = evaluate(detections, args.order)
+            result = evaluate_color(detections, args.color) if args.color else evaluate(detections, args.order)
             stable = stable + 1 if result["status"] == "ready" else 0
             if stable >= required:
                 break
@@ -157,7 +173,10 @@ def main(argv=None):
     result["stable_frames"] = stable
     if stable < required and result["status"] == "ready":
         result["status"] = "unstable"
-        result["observed_order"] = []
+        if args.color:
+            result["target"] = None
+        else:
+            result["observed_order"] = []
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         if not cv2.imwrite(str(args.output), annotate(last_frame, result["detections"])):
