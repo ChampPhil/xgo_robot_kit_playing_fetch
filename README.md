@@ -8,6 +8,7 @@ From the repository root, `./setup.sh` creates `.venv/` and installs `requiremen
 
 - [Colored-box detection](scripts/box_detection/README.md) — camera/photo/video CLI for purple, orange, and light-blue boxes; no motors.
 - [Movement tests](scripts/movement_tests/README.md) — explicit, timed movement CLI; commands motors only after confirmation.
+- [Sensor monitor](scripts/sensor_monitor/README.md) — live, read-only UART telemetry (battery, attitude, joints) in the terminal; requires the built-in menu to release the serial port.
 
 For example, with a local photo:
 

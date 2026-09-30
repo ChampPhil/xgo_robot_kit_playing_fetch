@@ -1,4 +1,5 @@
-# XGO Lite movement test (also installs pyserial)
+# XGO Lite motion library and read-only UART telemetry
 xgolib==1.1.10
+pyserial==3.5
 # Camera-only HSV box detection; headless works over SSH on Python 3.9 ARM64.
 opencv-python-headless==4.10.0.84
