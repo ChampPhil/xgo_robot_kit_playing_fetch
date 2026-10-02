@@ -99,9 +99,13 @@ def open_controller():
 
     pygame.init()
     controller.init()
-    for index in range(controller.get_count()):
-        if controller.is_controller(index):
-            return pygame, controller.Controller(index)
+    deadline = time.monotonic() + 2.0  # macOS reports devices only after a few event pumps
+    while time.monotonic() < deadline:
+        pygame.event.pump()
+        for index in range(controller.get_count()):
+            if controller.is_controller(index):
+                return pygame, controller.Controller(index)
+        time.sleep(0.05)
     raise RuntimeError(
         "no gamepad found. Plug it in; on a Logitech F310 set the back switch to D "
         "(macOS cannot read X/XInput mode)."
