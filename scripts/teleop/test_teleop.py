@@ -3,6 +3,8 @@
 import io
 import json
 import queue
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -88,6 +90,40 @@ class SenderTests(unittest.TestCase):
         self.assertTrue(command.startswith("cd ~/project/xgo_robot_kit_playing_fetch && exec python3"))
         self.assertIn("--max-x 10 --max-turn 30", command)
         self.assertNotIn("--max-y", command)
+
+
+    def test_stream_writes_through_ssh_pipe(self):
+        real_popen = subprocess.Popen
+        echo = [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"]
+
+        def fake_ssh(command, **kwargs):  # same pipe options as ssh, local echo process
+            self.assertEqual(command[0], "ssh")
+            return real_popen(echo, stdout=subprocess.PIPE, **kwargs)
+
+        args = sender.build_parser().parse_args([])
+        pad = SimpleNamespace(get_axis=lambda code: {1: -32768}.get(code, 0),
+                              get_button=lambda code: code == 9)
+        pygame = SimpleNamespace(event=SimpleNamespace(pump=lambda: None),
+                                 CONTROLLER_AXIS_LEFTX=0, CONTROLLER_AXIS_LEFTY=1,
+                                 CONTROLLER_AXIS_RIGHTX=2, CONTROLLER_BUTTON_LEFTSHOULDER=9,
+                                 CONTROLLER_BUTTON_START=6)
+        reads = {"n": 0}
+        real_read = sender.read_sticks
+
+        def read_twice(pg, pd):  # one command, then START
+            reads["n"] += 1
+            sticks = real_read(pg, pd)
+            return sticks if reads["n"] == 1 else (*sticks[:4], True)
+
+        with patch.object(sender.subprocess, "Popen", side_effect=fake_ssh), \
+                patch.object(sender, "read_sticks", side_effect=read_twice), \
+                patch("sys.stderr", io.StringIO()):
+            ssh = sender.start_ssh(args)
+            sender.stream(pygame, pad, ssh.stdin, args, ssh)
+            ssh.stdin.close()
+            output = ssh.stdout.read()
+            ssh.wait()
+        self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True})
 
 
 class ReceiverTests(unittest.TestCase):

@@ -136,6 +136,7 @@ def start_ssh(args):
          "-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=3",
          args.host, remote_command(args)],
         stdin=subprocess.PIPE,
+        text=True,
         start_new_session=True,  # Ctrl+C reaches only us; we then close stdin cleanly
     )
 
