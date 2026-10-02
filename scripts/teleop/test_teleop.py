@@ -29,9 +29,17 @@ class FakeDog:
     def stop(self):
         self.calls.append(("stop",))
 
+    def arm(self, x, z):
+        self.calls.append(("arm", x, z))
 
-def line(x=0.0, y=0.0, yaw=0.0, enable=True):
-    return json.dumps({"x": x, "y": y, "yaw": yaw, "enable": enable}) + "\n"
+    def claw(self, value):
+        self.calls.append(("claw", value))
+
+
+def line(x=0.0, y=0.0, yaw=0.0, enable=True, **extra):
+    message = {"x": x, "y": y, "yaw": yaw, "enable": enable}
+    message.update(extra)
+    return json.dumps(message) + "\n"
 
 
 QUIET = object()  # a get() that times out
@@ -106,6 +114,7 @@ class SenderTests(unittest.TestCase):
         pygame = SimpleNamespace(event=SimpleNamespace(pump=lambda: None),
                                  CONTROLLER_AXIS_LEFTX=0, CONTROLLER_AXIS_LEFTY=1,
                                  CONTROLLER_AXIS_RIGHTX=2, CONTROLLER_BUTTON_LEFTSHOULDER=9,
+                                 CONTROLLER_BUTTON_RIGHTSHOULDER=10, CONTROLLER_BUTTON_B=1,
                                  CONTROLLER_BUTTON_START=6)
         reads = {"n": 0}
         real_read = sender.read_sticks
@@ -113,7 +122,7 @@ class SenderTests(unittest.TestCase):
         def read_twice(pg, pd):  # one command, then START
             reads["n"] += 1
             sticks = real_read(pg, pd)
-            return sticks if reads["n"] == 1 else (*sticks[:4], True)
+            return sticks if reads["n"] == 1 else dict(sticks, start=True)
 
         with patch.object(sender.subprocess, "Popen", side_effect=fake_ssh), \
                 patch.object(sender, "read_sticks", side_effect=read_twice), \
@@ -123,7 +132,157 @@ class SenderTests(unittest.TestCase):
             ssh.stdin.close()
             output = ssh.stdout.read()
             ssh.wait()
-        self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True})
+        self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True,
+                                              "arm": False, "ax": 0.0, "az": 0.0, "claw": 0.0,
+                                              "bark": 0})
+
+    def state(self, **overrides):
+        state = dict(left_x=0.0, left_y=0.0, right_x=0.0, lb=False, rb=False, b=False, start=False)
+        state.update(overrides)
+        return state
+
+    def test_rb_switches_sticks_to_arm_and_disables_walking(self):
+        arming = sender.Arming(deadman=True)
+        message = sender.make_message(self.state(left_x=1, left_y=-1, right_x=1, lb=True, rb=True),
+                                      arming, 0.1, barks=2)
+        self.assertEqual(message, {"x": 1.0, "y": -1.0, "yaw": -1.0, "enable": False,
+                                   "arm": True, "ax": 1.0, "az": 1.0, "claw": 1.0, "bark": 2})
+        message = sender.make_message(self.state(left_x=-1, left_y=1, right_x=-1, rb=True),
+                                      arming, 0.1, barks=2)
+        self.assertEqual((message["ax"], message["az"], message["claw"]), (-1.0, -1.0, -1.0))
+
+    def test_arm_axes_are_zero_outside_arm_mode(self):
+        message = sender.make_message(self.state(left_x=1, left_y=-1, right_x=1, lb=True),
+                                      sender.Arming(deadman=True), 0.1, barks=0)
+        self.assertTrue(message["enable"])
+        self.assertEqual((message["arm"], message["ax"], message["az"], message["claw"]),
+                         (False, 0.0, 0.0, 0.0))
+
+    def test_new_receiver_flags_pass_through(self):
+        args = sender.build_parser().parse_args(["--ramp", "2", "--arm-home-z", "50"])
+        self.assertIn("--ramp 2 --arm-home-z 50", sender.remote_command(args))
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+class FakeSound:
+    def __init__(self):
+        self.done = False
+
+    def poll(self):
+        return 0 if self.done else None
+
+
+def arm_line(ax=0.0, az=0.0, claw=0.0, **extra):
+    message = {"x": 0, "y": 0, "yaw": 0, "enable": True, "arm": True,
+               "ax": ax, "az": az, "claw": claw}
+    message.update(extra)
+    return json.dumps(message) + "\n"
+
+
+class ArmBarkRampTests(unittest.TestCase):
+    def setUp(self):
+        self.args = receiver.build_parser().parse_args([])  # arm 60 mm/s, claw 170/s, home 40,30
+        self.dog = FakeDog()
+        self.clock = FakeClock()
+        self.arm = receiver.ArmController(self.dog, self.args, clock=self.clock)
+
+    def tick(self, seconds, **command):
+        self.clock.now += seconds
+        self.arm.update(dict({"ax": 0.0, "az": 0.0, "claw": 0.0}, **command))
+
+    def test_arm_mode_overrides_walking(self):
+        walk, arm, _ = receiver.parse_message(arm_line(ax=0.5, x=1))
+        self.assertEqual(walk, {"x": 0.0, "y": 0.0, "yaw": 0.0})
+        self.assertEqual(arm, {"ax": 0.5, "az": 0.0, "claw": 0.0})
+
+    def test_nothing_sent_until_a_stick_moves_then_starts_from_home(self):
+        self.tick(0.05)
+        self.tick(0.05)
+        self.assertEqual(self.dog.calls, [])
+        self.tick(0.05, az=1)  # first moving tick: no elapsed time yet counted from idle
+        self.tick(0.05, az=1)  # +3 mm at 60 mm/s
+        self.assertEqual(self.dog.calls, [("arm", 40, 30), ("arm", 40, 33)])
+
+    def test_arm_rate_is_capped_after_a_stall_and_clamped_to_limits(self):
+        self.tick(0, ax=1)
+        self.tick(5.0, ax=1)  # a 5 s gap counts as at most 0.1 s: +6 mm, not +300
+        self.assertEqual(self.dog.calls[-1], ("arm", 46, 30))
+        for _ in range(100):
+            self.tick(0.1, ax=1, az=-1)
+        self.assertEqual(self.dog.calls[-1], ("arm", 155, -95))
+
+    def test_claw_moves_without_touching_arm(self):
+        self.tick(0, claw=1)
+        self.tick(0.1, claw=1)  # 128 + 17
+        self.tick(0.1, claw=-1)
+        self.assertEqual(self.dog.calls, [("claw", 128), ("claw", 145), ("claw", 128)])
+
+    def test_idle_resets_elapsed_time(self):
+        self.tick(0, az=1)
+        self.arm.idle()
+        self.tick(3.0, az=1)
+        self.assertEqual(self.dog.calls, [("arm", 40, 30)])
+
+    def test_run_routes_arm_messages(self):
+        driver = receiver.Driver(self.dog, self.args)
+        receiver.run(driver, Paced(arm_line(az=1), arm_line(az=1), receiver.EOF), 0.5,
+                     lambda text: None, arm=self.arm)
+        self.assertEqual(self.dog.calls[0], ("arm", 40, 30))
+        self.assertNotIn(("x", 12), self.dog.calls)
+
+    def test_bark_plays_once_per_press(self):
+        sounds = []
+        barker = receiver.Barker(play=lambda: sounds.append(FakeSound()) or sounds[-1])
+        barker.update(0)
+        self.assertEqual(len(sounds), 0)
+        barker.update(1)  # a press in the very first processed line still barks
+        self.assertEqual(len(sounds), 1)
+        sounds[0].done = True
+        barker.update(1)
+        self.assertEqual(len(sounds), 1)
+        barker.update(6)
+        self.assertEqual(len(sounds), 2)
+        barker.update(7)  # still playing: ignored
+        self.assertEqual(len(sounds), 2)
+        sounds[1].done = True
+        barker.update(9)  # two presses lost in skipped lines still give one bark
+        self.assertEqual(len(sounds), 3)
+
+    def test_bad_bark_counter_is_rejected(self):
+        for bad in (-1, 1.5, True, "1"):
+            with self.assertRaises(ValueError):
+                receiver.parse_message(line(bark=bad))
+
+    def test_ramp_grows_stride_and_resets(self):
+        ramp = receiver.Ramp(2.0, 0.4, clock=self.clock)
+        walk = {"x": 1.0, "y": -0.5, "yaw": 1.0}
+        self.assertEqual(ramp.apply(walk), {"x": 0.4, "y": -0.2, "yaw": 1.0})
+        self.clock.now += 1.0
+        self.assertAlmostEqual(ramp.apply(walk)["x"], 0.7)
+        self.clock.now += 5.0
+        self.assertEqual(ramp.apply(walk)["x"], 1.0)
+        self.assertAlmostEqual(ramp.apply({"x": -1.0, "y": -0.5, "yaw": 0})["x"], -0.4)  # reversed
+        self.assertEqual(ramp.apply(walk)["y"], -0.5)  # y kept its direction the whole time
+        ramp.apply({"x": 0.0, "y": 0.0, "yaw": 0})
+        self.assertEqual(ramp.apply(walk)["x"], 0.4)
+
+    def test_ramp_off_by_default(self):
+        ramp = receiver.Ramp(self.args.ramp, self.args.ramp_start, clock=self.clock)
+        self.assertEqual(ramp.apply({"x": 1.0, "y": 1.0, "yaw": 0.0})["x"], 1.0)
+
+    def test_watchdog_resets_ramp(self):
+        ramp = receiver.Ramp(2.0, 0.4, clock=self.clock)
+        ramp.apply({"x": 1.0, "y": 0.0, "yaw": 0.0})
+        driver = receiver.Driver(self.dog, self.args)
+        receiver.run(driver, Paced(QUIET, receiver.EOF), 0.5, lambda text: None, ramp=ramp)
+        self.assertEqual(ramp.since, {})
 
 
 class ReceiverTests(unittest.TestCase):

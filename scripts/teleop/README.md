@@ -10,11 +10,24 @@ the robot turns them into `move_x` / `move_y` / `turn` calls.
 
 | Control | Robot |
 | --- | --- |
-| **LB (hold)** | Dead-man switch: the robot only moves while held |
-| Left stick up / down | Walk forward / backward |
-| Left stick left / right | Strafe left / right |
-| Right stick left / right | Turn left / right in place |
+| **LB (hold)** | Walk mode, dead-man switch: the robot only walks while held |
+| ↳ Left stick up / down | Walk forward / backward |
+| ↳ Left stick left / right | Strafe left / right |
+| ↳ Right stick left / right | Turn left / right in place |
+| **RB (hold)** | Arm mode: walking stops, the sticks move the arm (overrides LB) |
+| ↳ Left stick up / down | Raise / lower the arm |
+| ↳ Left stick right / left | Reach out / pull in |
+| ↳ Right stick right / left | Close / open the claw |
+| **B** | Bark (robot speaker) |
 | START, or Ctrl+C | Stop and quit |
+
+Arm mode is **speed** control: hold a stick and the arm keeps moving, centre it
+and the arm holds where it is. The arm's real pose cannot be read back (the
+arm/claw registers return no usable value), so the **first** arm stick move sends
+the arm to `--arm-home-x/--arm-home-z` (default 40, 30 mm) before moving from
+there, and the claw starts from `--claw-start` (128). Targets are clamped to the
+documented `arm(x, z)` range (x −80…155 mm, z −95…155 mm) and claw 0 (open)…255
+(closed). The manufacturer says not to carry more than 20 g.
 
 ## Setup (computer side only)
 
@@ -52,16 +65,30 @@ dog**, checks the battery (refuses below 20%), and then follows the sticks.
 Check the stream without a robot: `gamepad_sender.py --print` writes the commands
 to stdout.
 
-## Speed limits
+## Speed limits and acceleration
 
 Full stick deflection maps to the receiver's limits (defaults are about half the
 hardware maximum):
 
-| Flag | Default | Max (xgolib) |
+| Flag | Default | Range |
 | --- | --- | --- |
-| `--max-x` | 12 | 25 |
-| `--max-y` | 8 | 18 |
-| `--max-turn` | 40 | 100 |
+| `--max-x` | 12 | 1–25 |
+| `--max-y` | 8 | 1–18 |
+| `--max-turn` | 40 | 1–100 |
+| `--ramp` (seconds) | 0 (off) | 0–10 |
+| `--ramp-start` (fraction) | 0.4 | 0.1–1 |
+| `--arm-speed` (mm/s) | 60 | 5–150 |
+| `--claw-speed` (per s, of 0–255) | 170 | 20–500 |
+| `--arm-home-x` / `--arm-home-z` (mm) | 40 / 30 | arm range |
+| `--claw-start` | 128 | 0–255 |
+
+With `--ramp N`, holding forward/back or a strafe in one direction grows the
+stride from `--ramp-start` × the max to the full max over N seconds; it resets
+when the stick centres or reverses, LB is released, arm mode starts, or the
+watchdog fires. Turning is not ramped. Raise the max to use the extra range,
+for example `--ramp 2 --max-x 25 --max-y 18`.
+
+All of these can be given to `gamepad_sender.py`, which passes them through.
 
 ## When the robot stops
 
@@ -77,6 +104,9 @@ The receiver calls `stop()` when any of these happens:
 
 Commands that queued up while the UART was busy are skipped, so it always acts on
 the newest one.
+
+Barks play with `aplay` on the robot's default sound device (the WM8960 speaker);
+presses during a bark are ignored. The sound is credited in `sounds/CREDITS.md`.
 
 These are software stops. They do **not** protect against SIGKILL, a hung robot
 process, or the motion controller ignoring the UART, so stay within reach of the

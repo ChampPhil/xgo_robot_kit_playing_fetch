@@ -1,8 +1,10 @@
 """Stream gamepad sticks from this computer to the XGO Lite over SSH.
 
-Left stick: forward/back and strafe left/right. Right stick (left/right): turn.
-Hold LB to drive (dead-man switch); release it and the robot stops. Press
-START or Ctrl+C to quit. Commands go to teleop_receiver.py on the robot through
+Hold LB to walk (dead-man switch): left stick forward/back and strafe, right
+stick left/right turns. Release LB and the robot stops.
+Hold RB for arm mode (walking stops): left stick up/down raises/lowers the arm,
+right/left reaches out/in; right stick right/left closes/opens the claw.
+B barks. START or Ctrl+C quits. Commands go to teleop_receiver.py on the robot through
 the stdin of an SSH session, so the existing Tailscale SSH access is the link.
 """
 
@@ -21,6 +23,9 @@ os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")  # no window 
 DEFAULT_HOST = "pi@100.74.30.90"
 DEFAULT_REMOTE_DIR = "~/project/xgo_robot_kit_playing_fetch"
 AXIS_MAX = 32767
+# Passed through unchanged to teleop_receiver.py, which validates them.
+RECEIVER_FLAGS = ("max-x", "max-y", "max-turn", "ramp", "ramp-start", "arm-speed", "claw-speed",
+                  "arm-home-x", "arm-home-z", "claw-start")
 
 
 def bounded_number(value, *, minimum, maximum, label):
@@ -49,7 +54,7 @@ def build_parser():
     parser.add_argument("--no-deadman", action="store_true",
                         help="drive without holding LB (sticks must be centred first)")
     parser.add_argument("--yes", action="store_true", help="skip the safety confirmation prompt")
-    for flag in ("max-x", "max-y", "max-turn"):
+    for flag in RECEIVER_FLAGS:
         parser.add_argument(f"--{flag}", metavar="VALUE",
                             help="passed to teleop_receiver.py (see its --help for limits)")
     return parser
@@ -75,6 +80,20 @@ def make_command(left_x, left_y, right_x, enable, deadzone):
     }
     command = {axis: round(value, 3) + 0.0 for axis, value in command.items()}  # no -0.0
     command["enable"] = bool(enable)
+    return command
+
+
+def make_message(state, arming, deadzone, barks):
+    """Full command line: walking (LB), arm mode (RB, which overrides walking) and barks."""
+    command = make_command(state["left_x"], state["left_y"], state["right_x"], False, deadzone)
+    command["enable"] = arming.enable(command, state["lb"]) and not state["rb"]
+    command["arm"] = state["rb"]
+    # Arm mode, seen from the robot's side: stick right = reach out (+x), up = raise (+z);
+    # right stick right = close the claw (towards 255).
+    for key, value in (("ax", state["left_x"]), ("az", -state["left_y"]),
+                       ("claw", state["right_x"])):
+        command[key] = round(apply_deadzone(value, deadzone), 3) + 0.0 if state["rb"] else 0.0
+    command["bark"] = barks
     return command
 
 
@@ -115,17 +134,24 @@ def open_controller():
 def read_sticks(pygame, pad):
     pygame.event.pump()
     axis = lambda code: max(-1.0, pad.get_axis(code) / AXIS_MAX)  # noqa: E731
-    return (axis(pygame.CONTROLLER_AXIS_LEFTX), axis(pygame.CONTROLLER_AXIS_LEFTY),
-            axis(pygame.CONTROLLER_AXIS_RIGHTX),
-            bool(pad.get_button(pygame.CONTROLLER_BUTTON_LEFTSHOULDER)),
-            bool(pad.get_button(pygame.CONTROLLER_BUTTON_START)))
+    button = lambda code: bool(pad.get_button(code))  # noqa: E731
+    return {
+        "left_x": axis(pygame.CONTROLLER_AXIS_LEFTX),
+        "left_y": axis(pygame.CONTROLLER_AXIS_LEFTY),
+        "right_x": axis(pygame.CONTROLLER_AXIS_RIGHTX),
+        "lb": button(pygame.CONTROLLER_BUTTON_LEFTSHOULDER),
+        "rb": button(pygame.CONTROLLER_BUTTON_RIGHTSHOULDER),
+        "b": button(pygame.CONTROLLER_BUTTON_B),
+        "start": button(pygame.CONTROLLER_BUTTON_START),
+    }
 
 
 def remote_command(args):
     receiver = ["python3", "-u", "scripts/teleop/teleop_receiver.py"]
-    for flag in ("max_x", "max_y", "max_turn"):
-        if getattr(args, flag) is not None:
-            receiver += ["--" + flag.replace("_", "-"), getattr(args, flag)]
+    for flag in RECEIVER_FLAGS:
+        value = getattr(args, flag.replace("-", "_"))
+        if value is not None:
+            receiver += ["--" + flag, value]
     # remote_dir is left unquoted so the robot's shell expands "~".
     return f"cd {args.remote_dir} && exec {' '.join(shlex.quote(part) for part in receiver)}"
 
@@ -142,23 +168,29 @@ def start_ssh(args):
 
 
 def status_line(command):
+    if command["arm"]:
+        return "\rARM    reach {:+.2f}  lift {:+.2f}  claw {:+.2f}  barks {} ".format(
+            command["ax"], command["az"], command["claw"], command["bark"])
     state = "DRIVE" if command["enable"] else "hold "
-    return "\r{}  fwd {:+.2f}  left {:+.2f}  turn {:+.2f} ".format(
-        state, command["x"], command["y"], command["yaw"])
+    return "\r{}  fwd {:+.2f}  left {:+.2f}  turn {:+.2f}  barks {} ".format(
+        state, command["x"], command["y"], command["yaw"], command["bark"])
 
 
 def stream(pygame, pad, out, args, ssh=None):
     arming = Arming(deadman=not args.no_deadman)
     period = 1.0 / args.rate
+    barks, b_was_down = 0, False
     next_tick = time.monotonic()
     while True:
         if ssh is not None and ssh.poll() is not None:
             raise RuntimeError(f"SSH session ended (exit {ssh.returncode})")
-        left_x, left_y, right_x, lb_held, quit_pressed = read_sticks(pygame, pad)
-        if quit_pressed:
+        state = read_sticks(pygame, pad)
+        if state["start"]:
             return
-        command = make_command(left_x, left_y, right_x, enable=False, deadzone=args.deadzone)
-        command["enable"] = arming.enable(command, lb_held)
+        if state["b"] and not b_was_down:
+            barks += 1  # a counter, so a skipped line cannot lose a press
+        b_was_down = state["b"]
+        command = make_message(state, arming, args.deadzone, barks)
         out.write(json.dumps(command) + "\n")
         out.flush()
         if ssh is not None:
@@ -194,9 +226,8 @@ def main(argv=None):
         except EOFError:
             parser.error("confirmation requires a terminal; use --yes only when it is safe")
     ssh = start_ssh(args)
-    print("Hold LB and use the sticks. Release LB to stop; START or Ctrl+C quits."
-          if not args.no_deadman else "Centre the sticks to arm. START or Ctrl+C quits.",
-          file=sys.stderr)
+    print(("Hold LB to walk" if not args.no_deadman else "Centre the sticks, then walk")
+          + "; hold RB to move the arm/claw; B barks; START or Ctrl+C quits.", file=sys.stderr)
     try:
         stream(pygame, pad, ssh.stdin, args, ssh)
     except KeyboardInterrupt:
