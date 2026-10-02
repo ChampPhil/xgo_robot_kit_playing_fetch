@@ -4,6 +4,7 @@ Hold LB to walk (dead-man switch): left stick forward/back and strafe, right
 stick left/right turns. Release LB and the robot stops.
 Hold RB for arm mode (walking stops): left stick up/down raises/lowers the arm,
 right/left reaches out/in; right stick right/left closes/opens the claw.
+Hold LT and press D-pad down/up to kneel the front down / stand back up.
 B barks. START or Ctrl+C quits. Commands go to teleop_receiver.py on the robot through
 the stdin of an SSH session, so the existing Tailscale SSH access is the link.
 """
@@ -25,7 +26,8 @@ DEFAULT_REMOTE_DIR = "~/project/xgo_robot_kit_playing_fetch"
 AXIS_MAX = 32767
 # Passed through unchanged to teleop_receiver.py, which validates them.
 RECEIVER_FLAGS = ("max-x", "max-y", "max-turn", "ramp", "ramp-start", "arm-speed", "claw-speed",
-                  "arm-home-x", "arm-home-z", "claw-start")
+                  "arm-home-x", "arm-home-z", "claw-start", "kneel-pitch", "kneel-height",
+                  "stand-height", "kneel-time")
 
 
 def bounded_number(value, *, minimum, maximum, label):
@@ -94,6 +96,8 @@ def make_message(state, arming, deadzone, barks):
                        ("claw", state["right_x"])):
         command[key] = round(apply_deadzone(value, deadzone), 3) + 0.0 if state["rb"] else 0.0
     command["bark"] = barks
+    # LT + D-pad: kneel. Independent of LB/RB, so the arm still works while knelt.
+    command["kneel"] = (int(state["dpad_down"]) - int(state["dpad_up"])) if state["lt"] else 0
     return command
 
 
@@ -143,6 +147,10 @@ def read_sticks(pygame, pad):
         "rb": button(pygame.CONTROLLER_BUTTON_RIGHTSHOULDER),
         "b": button(pygame.CONTROLLER_BUTTON_B),
         "start": button(pygame.CONTROLLER_BUTTON_START),
+        # The F310's triggers are digital in D mode; SDL reports them as 0 or full-scale axes.
+        "lt": pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERLEFT) > AXIS_MAX // 2,
+        "dpad_up": button(pygame.CONTROLLER_BUTTON_DPAD_UP),
+        "dpad_down": button(pygame.CONTROLLER_BUTTON_DPAD_DOWN),
     }
 
 
@@ -172,8 +180,9 @@ def status_line(command):
         return "\rARM    reach {:+.2f}  lift {:+.2f}  claw {:+.2f}  barks {} ".format(
             command["ax"], command["az"], command["claw"], command["bark"])
     state = "DRIVE" if command["enable"] else "hold "
-    return "\r{}  fwd {:+.2f}  left {:+.2f}  turn {:+.2f}  barks {} ".format(
-        state, command["x"], command["y"], command["yaw"], command["bark"])
+    kneel = {1: "  KNEEL v", -1: "  STAND ^"}.get(command["kneel"], "")
+    return "\r{}  fwd {:+.2f}  left {:+.2f}  turn {:+.2f}  barks {}{} ".format(
+        state, command["x"], command["y"], command["yaw"], command["bark"], kneel)
 
 
 def stream(pygame, pad, out, args, ssh=None):
@@ -227,7 +236,8 @@ def main(argv=None):
             parser.error("confirmation requires a terminal; use --yes only when it is safe")
     ssh = start_ssh(args)
     print(("Hold LB to walk" if not args.no_deadman else "Centre the sticks, then walk")
-          + "; hold RB to move the arm/claw; B barks; START or Ctrl+C quits.", file=sys.stderr)
+          + "; hold RB to move the arm/claw; LT + D-pad down/up kneels/stands; B barks; "
+          "START or Ctrl+C quits.", file=sys.stderr)
     try:
         stream(pygame, pad, ssh.stdin, args, ssh)
     except KeyboardInterrupt:

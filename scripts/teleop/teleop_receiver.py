@@ -5,11 +5,14 @@ SSH, with axes in -1..1:
 
   {"x": fwd, "y": left, "yaw": ccw, "enable": bool,     walking (enable = LB held)
    "arm": bool, "ax": reach, "az": lift, "claw": close,  arm mode (arm = RB held)
-   "bark": presses}                                      B-button press counter
+   "bark": presses,                                      B-button press counter
+   "kneel": 1 | 0 | -1}                                  LT + D-pad down / up
 
 Walking stops when the sticks centre, enable drops, arm mode starts, input goes
 quiet for --timeout seconds, the stream ends, or anything goes wrong. In arm mode
 the sticks set arm/claw *speed*; the arm holds its position when they centre.
+Kneeling pitches the front down and lowers the body (the vendor's floor-pickup
+posture); it holds when released and returns to standing on exit.
 """
 
 import argparse
@@ -89,6 +92,21 @@ def build_parser():
         default=0.4, metavar="FRACTION",
         help="fraction of the full stride a ramped move starts at (default: 0.4)")
     parser.add_argument(
+        "--kneel-pitch", type=lambda v: bounded_number(v, minimum=0, maximum=10, label="kneel-pitch"),
+        default=10, metavar="DEGREES", help="front-down pitch when fully knelt (0–10; default: 10)")
+    parser.add_argument(
+        "--kneel-height", type=lambda v: bounded_number(v, minimum=60, maximum=110,
+                                                        label="kneel-height"),
+        default=70, metavar="MM", help="body height when fully knelt (60–110; default: 70)")
+    parser.add_argument(
+        "--stand-height", type=lambda v: bounded_number(v, minimum=60, maximum=110,
+                                                        label="stand-height"),
+        default=85, metavar="MM",
+        help="body height when standing; 85 is xgolib's neutral value (60–110; default: 85)")
+    parser.add_argument(
+        "--kneel-time", type=lambda v: bounded_number(v, minimum=0.5, maximum=10, label="kneel-time"),
+        default=2, metavar="SECONDS", help="time from standing to fully knelt (default: 2)")
+    parser.add_argument(
         "--timeout", type=lambda v: bounded_number(v, minimum=0.1, maximum=2, label="timeout"),
         default=0.5, metavar="SECONDS", help="stop if no command arrives this long (default: 0.5)",
     )
@@ -106,10 +124,11 @@ def axis_value(message, axis):
 
 
 def parse_message(line):
-    """Return (walk, arm, bark). Raises ValueError on bad input.
+    """Return (walk, arm, bark, kneel). Raises ValueError on bad input.
 
     walk is {axis: -1..1}, all zero unless enable is true and arm mode is off.
     arm is {ax, az, claw: -1..1} in arm mode, else None. bark is the press counter.
+    kneel is 1 (kneel down), -1 (stand up) or 0.
     """
     message = json.loads(line)
     if not isinstance(message, dict):
@@ -117,13 +136,16 @@ def parse_message(line):
     bark = message.get("bark", 0)
     if isinstance(bark, bool) or not isinstance(bark, int) or bark < 0:
         raise ValueError("bark must be a non-negative integer")
+    kneel = message.get("kneel", 0)
+    if isinstance(kneel, bool) or kneel not in (-1, 0, 1):
+        raise ValueError("kneel must be -1, 0 or 1")
     arm = None
     if message.get("arm") is True:
         arm = {axis: axis_value(message, axis) for axis in ARM_AXES}
     walk = dict.fromkeys(AXES, 0.0)
     if message.get("enable") is True and arm is None:
         walk = {axis: axis_value(message, axis) for axis in AXES}
-    return walk, arm, bark
+    return walk, arm, bark, kneel
 
 
 def parse_command(line):
@@ -271,6 +293,42 @@ def move_within_reach(pose, dx, dz):
     return [x + dx * low, z + dz * low]
 
 
+class Posture:
+    """Kneel level 0 (standing) .. 1 (front pitched down, body lowered), changed at a fixed rate."""
+
+    def __init__(self, dog, args, clock=time.monotonic):
+        self.dog = dog
+        self.args = args
+        self.clock = clock
+        self.level = 0.0
+        self.last = None
+        self.sent = None
+
+    def update(self, direction):
+        if not direction or (direction < 0 and self.level <= 0) or (direction > 0 and self.level >= 1):
+            self.last = None  # released or at the end: hold, and don't bank elapsed time
+            return
+        now = self.clock()
+        dt = 0.0 if self.last is None else min(now - self.last, MAX_ARM_STEP)
+        self.last = now
+        self.level = clamp(self.level + direction * dt / self.args.kneel_time, (0.0, 1.0))
+        self.send()
+
+    def stand(self):
+        if self.sent is not None:
+            self.level = 0.0
+            self.send()
+
+    def send(self):
+        pitch = round(self.level * self.args.kneel_pitch, 2)
+        height = round(self.args.stand_height
+                       + self.level * (self.args.kneel_height - self.args.stand_height), 2)
+        if (pitch, height) != self.sent:
+            self.dog.attitude("p", pitch)  # + is front down (xgolib's floor-pickup demo)
+            self.dog.translation("z", height)
+            self.sent = (pitch, height)
+
+
 class Barker:
     """Play the bark when the press counter increases; ignore presses while one is playing."""
 
@@ -311,7 +369,8 @@ def latest(lines, line):
     return line
 
 
-def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ramp=None):
+def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ramp=None,
+        posture=None):
     """Apply commands until the stream ends; always leaves the robot stopped."""
     try:
         while True:
@@ -328,13 +387,15 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                         ramp.reset()
                     if arm is not None:
                         arm.idle()
+                    if posture is not None:
+                        posture.update(0)
                     continue
             line = latest(lines, line)
             if line is EOF:
                 log("Command stream ended; stopping.")
                 return
             try:
-                walk, arm_command, bark = parse_message(line)
+                walk, arm_command, bark, kneel = parse_message(line)
             except ValueError as exc:
                 log(f"Bad command ({exc}); stopping.")
                 driver.stop()
@@ -342,6 +403,8 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                     ramp.reset()
                 if arm is not None:
                     arm.idle()
+                if posture is not None:
+                    posture.update(0)
                 continue
             if ramp is not None:
                 walk = ramp.apply(walk)
@@ -353,8 +416,12 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                     arm.update(arm_command)
             if barker is not None:
                 barker.update(bark)
+            if posture is not None:
+                posture.update(kneel)
     finally:
         driver.stop()
+        if posture is not None:
+            posture.stand()
 
 
 def main(argv=None):
@@ -389,7 +456,7 @@ def main(argv=None):
             log(f"Bark sound missing at {BARK_SOUND}; B will do nothing.")
         run(driver, lines, args.timeout, log, first=first,
             arm=ArmController(dog, args), barker=Barker(log=log),
-            ramp=Ramp(args.ramp, args.ramp_start))
+            ramp=Ramp(args.ramp, args.ramp_start), posture=Posture(dog, args))
     finally:
         driver.stop()
         log("Robot stopped.")

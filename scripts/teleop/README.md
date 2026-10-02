@@ -18,6 +18,7 @@ the robot turns them into `move_x` / `move_y` / `turn` calls.
 | ↳ Left stick up / down | Raise / lower the arm |
 | ↳ Left stick right / left | Reach out / pull in |
 | ↳ Right stick right / left | Close / open the claw |
+| **LT (hold) + D-pad down / up** | Kneel the front down toward the floor / stand back up |
 | **B** | Bark (robot speaker) |
 | START, or Ctrl+C | Stop and quit |
 
@@ -33,6 +34,15 @@ frozen. Measured on the robot: (140, 30) and (80, 115) are followed; (150, 30),
 (80, 130) and (55, 30) are ignored; (80, −90) is followed, close to the API floor
 of z −95. The controller now moves the arm only as far as that ring allows and
 stops at its edge, so reversing a stick always moves the arm straight away. The manufacturer says not to carry more than 20 g.
+
+Kneeling pitches the front of the body down (up to +10°, the Lite's limit) and
+lowers the body (to 70 mm), the posture xgolib's own floor-pickup demo uses. Hold
+the D-pad to keep going; release it and the robot holds that pose. It is
+independent of LB/RB, so the arm and claw work normally while knelt, and lowering
+the body brings the whole arm reach ring closer to the floor. Quitting returns the
+robot to standing. Body height while standing is assumed to be 85 mm (xgolib's
+neutral value); if the first kneel press makes the body jump, adjust
+`--stand-height`.
 
 ## Setup (computer side only)
 
@@ -86,6 +96,10 @@ hardware maximum):
 | `--claw-speed` (per s, of 0–255) | 170 | 20–500 |
 | `--arm-home-x` / `--arm-home-z` (mm) | 80 / 30 | inside the reach ring |
 | `--claw-start` | 128 | 0–255 |
+| `--kneel-pitch` (degrees, front down) | 10 | 0–10 |
+| `--kneel-height` (mm) | 70 | 60–110 |
+| `--stand-height` (mm) | 85 | 60–110 |
+| `--kneel-time` (seconds, stand → full kneel) | 2 | 0.5–10 |
 
 With `--ramp N`, holding forward/back or a strafe in one direction grows the
 stride from `--ramp-start` × the max to the full max over N seconds; it resets

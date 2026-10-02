@@ -30,6 +30,12 @@ class FakeDog:
     def stop(self):
         self.calls.append(("stop",))
 
+    def attitude(self, direction, value):
+        self.calls.append(("attitude", direction, value))
+
+    def translation(self, direction, value):
+        self.calls.append(("translation", direction, value))
+
     def arm(self, x, z):
         self.calls.append(("arm", x, z))
 
@@ -116,7 +122,8 @@ class SenderTests(unittest.TestCase):
                                  CONTROLLER_AXIS_LEFTX=0, CONTROLLER_AXIS_LEFTY=1,
                                  CONTROLLER_AXIS_RIGHTX=2, CONTROLLER_BUTTON_LEFTSHOULDER=9,
                                  CONTROLLER_BUTTON_RIGHTSHOULDER=10, CONTROLLER_BUTTON_B=1,
-                                 CONTROLLER_BUTTON_START=6)
+                                 CONTROLLER_BUTTON_START=6, CONTROLLER_AXIS_TRIGGERLEFT=4,
+                                 CONTROLLER_BUTTON_DPAD_UP=11, CONTROLLER_BUTTON_DPAD_DOWN=12)
         reads = {"n": 0}
         real_read = sender.read_sticks
 
@@ -135,10 +142,11 @@ class SenderTests(unittest.TestCase):
             ssh.wait()
         self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True,
                                               "arm": False, "ax": 0.0, "az": 0.0, "claw": 0.0,
-                                              "bark": 0})
+                                              "bark": 0, "kneel": 0})
 
     def state(self, **overrides):
-        state = dict(left_x=0.0, left_y=0.0, right_x=0.0, lb=False, rb=False, b=False, start=False)
+        state = dict(left_x=0.0, left_y=0.0, right_x=0.0, lb=False, rb=False, b=False, start=False,
+                     lt=False, dpad_up=False, dpad_down=False)
         state.update(overrides)
         return state
 
@@ -147,10 +155,25 @@ class SenderTests(unittest.TestCase):
         message = sender.make_message(self.state(left_x=1, left_y=-1, right_x=1, lb=True, rb=True),
                                       arming, 0.1, barks=2)
         self.assertEqual(message, {"x": 1.0, "y": -1.0, "yaw": -1.0, "enable": False,
-                                   "arm": True, "ax": 1.0, "az": 1.0, "claw": 1.0, "bark": 2})
+                                   "arm": True, "ax": 1.0, "az": 1.0, "claw": 1.0, "bark": 2,
+                                   "kneel": 0})
         message = sender.make_message(self.state(left_x=-1, left_y=1, right_x=-1, rb=True),
                                       arming, 0.1, barks=2)
         self.assertEqual((message["ax"], message["az"], message["claw"]), (-1.0, -1.0, -1.0))
+
+    def test_lt_with_dpad_kneels_and_stands(self):
+        arming = sender.Arming(deadman=True)
+        kneel = lambda **s: sender.make_message(self.state(**s), arming, 0.1, 0)["kneel"]  # noqa: E731
+        self.assertEqual(kneel(lt=True, dpad_down=True), 1)
+        self.assertEqual(kneel(lt=True, dpad_up=True), -1)
+        self.assertEqual(kneel(dpad_down=True), 0)  # D-pad alone does nothing
+        self.assertEqual(kneel(lt=True), 0)
+        self.assertEqual(kneel(lt=True, dpad_up=True, dpad_down=True), 0)
+
+    def test_kneel_works_alongside_arm_mode(self):
+        message = sender.make_message(self.state(rb=True, lt=True, dpad_down=True, left_y=-1),
+                                      sender.Arming(deadman=True), 0.1, 0)
+        self.assertEqual((message["arm"], message["az"], message["kneel"]), (True, 1.0, 1))
 
     def test_arm_axes_are_zero_outside_arm_mode(self):
         message = sender.make_message(self.state(left_x=1, left_y=-1, right_x=1, lb=True),
@@ -199,7 +222,7 @@ class ArmBarkRampTests(unittest.TestCase):
         self.arm.update(dict({"ax": 0.0, "az": 0.0, "claw": 0.0}, **command))
 
     def test_arm_mode_overrides_walking(self):
-        walk, arm, _ = receiver.parse_message(arm_line(ax=0.5, x=1))
+        walk, arm, _, _ = receiver.parse_message(arm_line(ax=0.5, x=1))
         self.assertEqual(walk, {"x": 0.0, "y": 0.0, "yaw": 0.0})
         self.assertEqual(arm, {"ax": 0.5, "az": 0.0, "claw": 0.0})
 
@@ -333,6 +356,78 @@ class ArmBarkRampTests(unittest.TestCase):
         driver = receiver.Driver(self.dog, self.args)
         receiver.run(driver, Paced(QUIET, receiver.EOF), 0.5, lambda text: None, ramp=ramp)
         self.assertEqual(ramp.since, {})
+
+
+class KneelTests(unittest.TestCase):
+    def setUp(self):
+        self.args = receiver.build_parser().parse_args([])  # 2 s to full kneel: pitch 10, z 85->70
+        self.dog = FakeDog()
+        self.clock = FakeClock()
+        self.posture = receiver.Posture(self.dog, self.args, clock=self.clock)
+
+    def tick(self, seconds, direction):
+        self.clock.now += seconds
+        self.posture.update(direction)
+
+    def test_kneel_parses_and_rejects_bad_values(self):
+        self.assertEqual(receiver.parse_message(line(kneel=1))[3], 1)
+        self.assertEqual(receiver.parse_message(line())[3], 0)
+        for bad in (2, 0.5, True, "1"):
+            with self.assertRaises(ValueError):
+                receiver.parse_message(line(kneel=bad))
+
+    def test_nothing_sent_until_kneel_is_pressed(self):
+        self.tick(0.1, 0)
+        self.tick(0.1, -1)  # already standing: "up" does nothing
+        self.assertEqual(self.dog.calls, [])
+
+    def test_kneel_down_ramps_pitch_and_height_then_holds(self):
+        self.tick(0, 1)
+        self.tick(0.1, 1)  # 5% of the way
+        self.assertEqual(self.dog.calls, [("attitude", "p", 0), ("translation", "z", 85),
+                                          ("attitude", "p", 0.5), ("translation", "z", 84.25)])
+        for _ in range(40):
+            self.tick(0.1, 1)
+        self.assertEqual(self.dog.calls[-2:], [("attitude", "p", 10), ("translation", "z", 70)])
+        sent = len(self.dog.calls)
+        self.tick(0.1, 1)  # fully knelt: nothing more
+        self.tick(0.1, 0)  # released: holds
+        self.assertEqual(len(self.dog.calls), sent)
+
+    def test_stand_up_and_exit_restores_standing(self):
+        self.tick(0, 1)
+        for _ in range(10):
+            self.tick(0.1, 1)
+        self.tick(0.1, -1)
+        self.tick(0.1, -1)
+        self.assertEqual(self.dog.calls[-2:], [("attitude", "p", 4.0), ("translation", "z", 79.0)])
+        self.posture.stand()
+        self.assertEqual(self.dog.calls[-2:], [("attitude", "p", 0), ("translation", "z", 85)])
+        sent = len(self.dog.calls)
+        self.posture.stand()  # already standing
+        self.assertEqual(len(self.dog.calls), sent)
+
+    def test_a_stall_does_not_jump(self):
+        self.tick(0, 1)
+        self.tick(5.0, 1)  # counts as at most 0.1 s
+        self.assertEqual(self.dog.calls[-2:], [("attitude", "p", 0.5), ("translation", "z", 84.25)])
+
+    def test_run_routes_kneel_and_stands_on_exit(self):
+        driver = receiver.Driver(self.dog, self.args)
+        self.posture.update(1)  # first press sends the standing pose
+        self.posture.level = 0.5
+        receiver.run(driver, Paced(line(kneel=1), line(kneel=1), receiver.EOF), 0.5,
+                     lambda text: None, posture=self.posture)
+        self.assertIn(("attitude", "p", 5.0), self.dog.calls)  # routed: level 0.5 was sent
+        self.assertEqual(self.dog.calls[-2:], [("attitude", "p", 0), ("translation", "z", 85)])
+
+    def test_kneel_flags_are_bounded(self):
+        parser = receiver.build_parser()
+        with patch("sys.stderr", io.StringIO()):
+            for argv in (["--kneel-pitch", "11"], ["--kneel-height", "59"],
+                         ["--stand-height", "111"], ["--kneel-time", "0"]):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(argv)
 
 
 class ReceiverTests(unittest.TestCase):
