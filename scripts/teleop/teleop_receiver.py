@@ -30,6 +30,10 @@ AXES = ("x", "y", "yaw")
 ARM_AXES = ("ax", "az", "claw")
 LIMITS = {"x": 25, "y": 18, "yaw": 100}  # xgolib VX/VY/VYAW limits for the Lite
 ARM_LIMITS = {"x": (-80, 155), "z": (-95, 155), "claw": (0, 255)}  # arm(x, z) mm; claw 0=open
+# The arm only reaches a ring around its base; the firmware silently ignores targets outside
+# it, so the arm "freezes". Measured: (140, 30) and (80, 115) followed, (150, 30), (80, 130)
+# and (55, 30) ignored; xgolib's arm_polar documents radius 80-140 mm. Kept in front (x >= 0).
+ARM_REACH = (80, 140)
 MAX_ARM_STEP = 0.1  # seconds; a late message never makes the arm jump to catch up
 BARK_SOUND = Path(__file__).resolve().parent / "sounds" / "bark.wav"
 EOF = object()
@@ -64,7 +68,7 @@ def build_parser():
         "--claw-speed", type=lambda v: bounded_number(v, minimum=20, maximum=500, label="claw-speed"),
         default=170, metavar="UNITS_PER_S",
         help="full-stick claw speed (20–500 of 0–255 per s; default: 170)")
-    for axis, default in (("x", 40), ("z", 30)):
+    for axis, default in (("x", 80), ("z", 30)):  # measured reachable
         low, high = ARM_LIMITS[axis]
         parser.add_argument(
             f"--arm-home-{axis}", type=lambda v, lo=low, hi=high, name=axis: bounded_number(
@@ -217,8 +221,7 @@ class ArmController:
             if self.pose is None:
                 self.pose = [self.args.arm_home_x, self.args.arm_home_z]
             step = self.args.arm_speed * dt
-            self.pose = [clamp(self.pose[0] + command["ax"] * step, ARM_LIMITS["x"]),
-                         clamp(self.pose[1] + command["az"] * step, ARM_LIMITS["z"])]
+            self.pose = move_within_reach(self.pose, command["ax"] * step, command["az"] * step)
         if command["claw"]:
             if self.grip is None:
                 self.grip = self.args.claw_start
@@ -238,6 +241,34 @@ class ArmController:
 
 def clamp(value, limits):
     return max(limits[0], min(limits[1], value))
+
+
+def in_reach(x, z):
+    """True for targets the arm follows: in front, inside the reach ring and the API box."""
+    return (x >= 0 and ARM_REACH[0] <= math.hypot(x, z) <= ARM_REACH[1]
+            and ARM_LIMITS["x"][0] <= x <= ARM_LIMITS["x"][1]
+            and ARM_LIMITS["z"][0] <= z <= ARM_LIMITS["z"][1])
+
+
+def move_within_reach(pose, dx, dz):
+    """Move as far along (dx, dz) as stays in reach, then stop at the edge (no sliding).
+
+    The target therefore never leaves what the arm can follow, so reversing a stick
+    always moves the arm straight away.
+    """
+    x, z = pose
+    if not in_reach(x, z):  # e.g. an unreachable --arm-home: take the step as asked
+        return [clamp(x + dx, ARM_LIMITS["x"]), clamp(z + dz, ARM_LIMITS["z"])]
+    if in_reach(x + dx, z + dz):
+        return [x + dx, z + dz]
+    low, high = 0.0, 1.0  # bisect for the furthest reachable fraction of the step
+    for _ in range(20):
+        middle = (low + high) / 2
+        if in_reach(x + dx * middle, z + dz * middle):
+            low = middle
+        else:
+            high = middle
+    return [x + dx * low, z + dz * low]
 
 
 class Barker:

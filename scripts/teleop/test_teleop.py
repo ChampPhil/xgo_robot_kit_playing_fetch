@@ -2,6 +2,7 @@
 
 import io
 import json
+import math
 import queue
 import subprocess
 import sys
@@ -208,15 +209,64 @@ class ArmBarkRampTests(unittest.TestCase):
         self.assertEqual(self.dog.calls, [])
         self.tick(0.05, az=1)  # first moving tick: no elapsed time yet counted from idle
         self.tick(0.05, az=1)  # +3 mm at 60 mm/s
-        self.assertEqual(self.dog.calls, [("arm", 40, 30), ("arm", 40, 33)])
+        self.assertEqual(self.dog.calls, [("arm", 80, 30), ("arm", 80, 33)])
 
     def test_arm_rate_is_capped_after_a_stall_and_clamped_to_limits(self):
         self.tick(0, ax=1)
         self.tick(5.0, ax=1)  # a 5 s gap counts as at most 0.1 s: +6 mm, not +300
-        self.assertEqual(self.dog.calls[-1], ("arm", 46, 30))
+        self.assertEqual(self.dog.calls[-1], ("arm", 86, 30))
         for _ in range(100):
             self.tick(0.1, ax=1, az=-1)
-        self.assertEqual(self.dog.calls[-1], ("arm", 155, -95))
+        x, z = self.dog.calls[-1][1:]
+        self.assertAlmostEqual(math.hypot(x, z), receiver.ARM_REACH[1], delta=1)
+        self.assertGreaterEqual(z, receiver.ARM_LIMITS["z"][0])
+
+    def test_target_never_leaves_reach_so_reversing_moves_at_once(self):
+        # Measured on the robot: (140, 30) followed, (150, 30) ignored; (80, 115) followed,
+        # (80, 130) ignored. Out-of-reach targets are silently ignored by the firmware.
+        self.tick(0, ax=1)
+        for _ in range(50):  # hold "reach out" far longer than needed
+            self.tick(0.1, ax=1)
+        x, z = self.dog.calls[-1][1:]
+        self.assertLessEqual(math.hypot(x, z), receiver.ARM_REACH[1] + 0.5)
+        self.tick(0.1, ax=-1)  # pull in: the very next command must be reachable and different
+        x2, z2 = self.dog.calls[-1][1:]
+        self.assertLess(x2, x)
+
+    def test_diagonal_windup_cannot_strand_the_arm(self):
+        self.tick(0, ax=1, az=1)
+        for _ in range(50):
+            self.tick(0.1, ax=1, az=1)
+        for _ in range(3):  # only pull in; height was pushed out of reach too
+            self.tick(0.1, ax=-1)
+        for call in self.dog.calls:
+            self.assertLessEqual(math.hypot(*call[1:]), receiver.ARM_REACH[1] + 0.5, call)
+        self.assertNotEqual(self.dog.calls[-1], self.dog.calls[-4])
+
+    def test_target_stays_out_of_the_unreachable_core_and_in_front(self):
+        # (70, 30) followed but (55, 30) was ignored: too close to the arm base.
+        self.tick(0, ax=-1)
+        for _ in range(50):
+            self.tick(0.1, ax=-1)
+        for call in self.dog.calls:
+            x, z = call[1:]
+            self.assertGreaterEqual(math.hypot(x, z), receiver.ARM_REACH[0] - 1, call)  # int rounding
+            self.assertGreaterEqual(x, 0, call)
+
+    def test_stops_at_the_edge_instead_of_sliding_along_it(self):
+        self.tick(0, ax=1)
+        for _ in range(50):  # hold "reach out" at z=30 well past the edge
+            self.tick(0.1, ax=1)
+        self.assertEqual(self.dog.calls[-1][2], 30)  # height unchanged: no drift downwards
+        start = len(self.dog.calls)
+        for _ in range(10):  # at full reach, raising is out of reach too: nothing is sent
+            self.tick(0.1, az=1)
+        self.assertEqual(len(self.dog.calls), start)
+
+    def test_default_home_is_reachable(self):
+        self.assertTrue(receiver.ARM_REACH[0] <= math.hypot(self.args.arm_home_x,
+                                                            self.args.arm_home_z)
+                        <= receiver.ARM_REACH[1])
 
     def test_claw_moves_without_touching_arm(self):
         self.tick(0, claw=1)
@@ -228,13 +278,13 @@ class ArmBarkRampTests(unittest.TestCase):
         self.tick(0, az=1)
         self.arm.idle()
         self.tick(3.0, az=1)
-        self.assertEqual(self.dog.calls, [("arm", 40, 30)])
+        self.assertEqual(self.dog.calls, [("arm", 80, 30)])
 
     def test_run_routes_arm_messages(self):
         driver = receiver.Driver(self.dog, self.args)
         receiver.run(driver, Paced(arm_line(az=1), arm_line(az=1), receiver.EOF), 0.5,
                      lambda text: None, arm=self.arm)
-        self.assertEqual(self.dog.calls[0], ("arm", 40, 30))
+        self.assertEqual(self.dog.calls[0], ("arm", 80, 30))
         self.assertNotIn(("x", 12), self.dog.calls)
 
     def test_bark_plays_once_per_press(self):

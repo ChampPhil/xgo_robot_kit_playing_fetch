@@ -24,10 +24,15 @@ the robot turns them into `move_x` / `move_y` / `turn` calls.
 Arm mode is **speed** control: hold a stick and the arm keeps moving, centre it
 and the arm holds where it is. The arm's real pose cannot be read back (the
 arm/claw registers return no usable value), so the **first** arm stick move sends
-the arm to `--arm-home-x/--arm-home-z` (default 40, 30 mm) before moving from
-there, and the claw starts from `--claw-start` (128). Targets are clamped to the
-documented `arm(x, z)` range (x −80…155 mm, z −95…155 mm) and claw 0 (open)…255
-(closed). The manufacturer says not to carry more than 20 g.
+the arm to `--arm-home-x/--arm-home-z` (default 80, 30 mm) before moving from
+there, and the claw starts from `--claw-start` (128). The claw is 0 (open)…255 (closed).
+
+The arm only reaches a **ring** 80–140 mm from its base, in front of the body; the
+firmware silently ignores targets outside it, which used to make the arm look
+frozen. Measured on the robot: (140, 30) and (80, 115) are followed; (150, 30),
+(80, 130) and (55, 30) are ignored; (80, −90) is followed, close to the API floor
+of z −95. The controller now moves the arm only as far as that ring allows and
+stops at its edge, so reversing a stick always moves the arm straight away. The manufacturer says not to carry more than 20 g.
 
 ## Setup (computer side only)
 
@@ -79,7 +84,7 @@ hardware maximum):
 | `--ramp-start` (fraction) | 0.4 | 0.1–1 |
 | `--arm-speed` (mm/s) | 60 | 5–150 |
 | `--claw-speed` (per s, of 0–255) | 170 | 20–500 |
-| `--arm-home-x` / `--arm-home-z` (mm) | 40 / 30 | arm range |
+| `--arm-home-x` / `--arm-home-z` (mm) | 80 / 30 | inside the reach ring |
 | `--claw-start` | 128 | 0–255 |
 
 With `--ramp N`, holding forward/back or a strafe in one direction grows the
