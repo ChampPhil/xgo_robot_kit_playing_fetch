@@ -1,0 +1,2 @@
+# Mac-side gamepad reader for scripts/teleop/gamepad_sender.py; not needed on the robot.
+pygame-ce==2.5.8

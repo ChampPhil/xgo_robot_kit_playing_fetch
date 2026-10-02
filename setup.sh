@@ -9,3 +9,4 @@ python3 -m venv .venv
 printf '\nReady. Movement: .venv/bin/python scripts/movement_tests/basic_movement.py --help\n'
 printf 'Box detection: .venv/bin/python scripts/box_detection/detect_boxes.py --help\n'
 printf 'Sensors: .venv/bin/python scripts/sensor_monitor/stream_sensors.py --help\n'
+printf 'Gamepad teleop (Mac): see scripts/teleop/README.md\n'
