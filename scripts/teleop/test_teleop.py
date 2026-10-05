@@ -2,11 +2,13 @@
 
 import io
 import json
+import tempfile
 import math
 import queue
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -554,6 +556,71 @@ class ReceiverTests(unittest.TestCase):
             for argv in (["--max-x", "26"], ["--max-y", "0"], ["--max-turn", "nan"]):
                 with self.assertRaises(SystemExit):
                     parser.parse_args(argv)
+
+
+    def test_run_records_motion_and_replays_through_teach(self):
+        import teach
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        clock = FakeClock()
+        args = receiver.build_parser().parse_args([])
+        dog = FakeDog()
+        arm = receiver.ArmController(dog, args, clock=clock)
+        posture = receiver.Posture(dog, args, clock=clock)
+        driver = receiver.Driver(dog, args)
+        frame = __import__("numpy").zeros((240, 320, 3), dtype="uint8")
+        camera = SimpleNamespace(start=lambda: None, close=lambda: None,
+                                 latest=lambda: (frame, clock.now))
+        box = {"bbox": [140, 100, 40, 40], "center": [160, 120], "area_px": 1600}
+        recorder = teach.Recorder(Path(tmp.name), camera, lambda f: {"purple": [box]}, "purple",
+                                  clock=clock, free_mb=lambda p: 10 ** 6, encode=lambda f: b"j")
+        arm.listener = posture.listener = recorder.on_send
+        replayer = teach.Replayer(arm, posture, clock=clock, settle=0)
+        controller = teach.TeachController(
+            camera, recorder, replayer, Path(tmp.name),
+            lambda: receiver.robot_state(driver, arm, posture), lambda text: None)
+        idle = dict(enable=False, record=2, replay=1)  # no LB: not manual input
+        lines = [line(record=1),
+                 arm_line(az=1, record=1), arm_line(az=1, record=1),
+                 line(record=2),
+                 line(**idle), line(**idle), line(**idle), receiver.EOF]
+        clock_lines = Paced(*lines)
+        real_get = clock_lines.get
+
+        def get(timeout=None):
+            clock.now += 0.1
+            return real_get(timeout)
+
+        clock_lines.get = get
+        receiver.run(driver, clock_lines, 0.5, lambda text: None, arm=arm, posture=posture,
+                     teach=controller)
+        session = next(Path(tmp.name).iterdir())
+        motion = json.loads((session / "motion.json").read_text())
+        self.assertEqual(motion["events"][0]["arm"], [80, 30])
+        replayed = [call for call in dog.calls if call[0] == "arm"]
+        self.assertEqual(replayed[-1], ("arm", 80, 36))  # the replay ends at the last pose
+
+    def test_run_finalises_recording_on_exit(self):
+        events = []
+        teach_stub = SimpleNamespace(
+            update=lambda message, manual: False, watchdog=lambda: None,
+            close=lambda: events.append("close"))
+        posture = receiver.Posture(self.dog, self.args, clock=FakeClock())
+        posture.stand = lambda: events.append("stand")
+        receiver.run(self.driver, Paced(line(), receiver.EOF), 0.5, self.log.append,
+                     posture=posture, teach=teach_stub)
+        self.assertEqual(events, ["close", "stand"])
+
+    def test_teach_flags(self):
+        args = receiver.build_parser().parse_args([])
+        self.assertEqual((args.color, args.record_fps, args.min_free_mb, args.replay_settle),
+                         ("purple", 10, 200, 1.0))
+        self.assertTrue(args.teach_dir.endswith("xgo_teach"))
+        with patch("sys.stderr", io.StringIO()):
+            for argv in (["--color", "red"], ["--record-fps", "0"], ["--min-free-mb", "10"]):
+                with self.assertRaises(SystemExit):
+                    receiver.build_parser().parse_args(argv)
 
 
 if __name__ == "__main__":

@@ -184,5 +184,217 @@ class RecorderTests(unittest.TestCase):
                          ["20261005-120000", "20261005-120000-2"])
 
 
+class FakeArm:
+    def __init__(self):
+        self.calls = []
+
+    def set_pose(self, x, z):
+        self.calls.append(("arm", x, z))
+
+    def set_claw(self, value):
+        self.calls.append(("claw", value))
+
+
+class FakePosture:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def set_level(self, level):
+        self.calls.append(("kneel", level))
+
+
+MOTION = {"version": 1, "color": "purple", "duration": 2.0,
+          "start": {"arm": [80, 30], "claw": 0, "kneel": 0.0},
+          "events": [{"t": 0.5, "arm": [90, 20]}, {"t": 1.0, "claw": 200},
+                     {"t": 1.5, "kneel": 0.5}]}
+
+
+class ReplayTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.clock = FakeClock()
+        self.arm = FakeArm()
+        self.posture = FakePosture(self.arm.calls)
+        self.replayer = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=1.0)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def save(self, name, motion):
+        (self.root / name).mkdir()
+        (self.root / name / "motion.json").write_text(json.dumps(motion))
+
+    def test_latest_session_and_load(self):
+        self.assertIsNone(teach.latest_session(self.root))
+        self.save("20261005-110000", MOTION)
+        self.save("20261005-120000", MOTION)
+        (self.root / "20261005-130000").mkdir()  # unfinished: no motion.json
+        self.assertEqual(teach.latest_session(self.root).name, "20261005-120000")
+        self.assertEqual(teach.load_motion(teach.latest_session(self.root)), MOTION)
+        self.assertIsNone(teach.latest_session(self.root / "missing"))
+
+    def test_load_rejects_bad_motion(self):
+        for bad in ({"version": 2}, dict(MOTION, events=[{"t": -1, "arm": [1, 2]}]),
+                    dict(MOTION, events=[{"t": 1, "leg": 3}]),
+                    dict(MOTION, events=[{"t": 1, "arm": [1, 2], "claw": 3}])):
+            self.save("bad", bad)
+            with self.assertRaises(ValueError):
+                teach.load_motion(self.root / "bad")
+            (self.root / "bad" / "motion.json").unlink()
+            (self.root / "bad").rmdir()
+        self.save("cut", MOTION)
+        (self.root / "cut" / "motion.json").write_text('{"version": 1, "ev')  # power cut
+        with self.assertRaises(ValueError):
+            teach.load_motion(self.root / "cut")
+
+    def test_replay_sends_start_then_events_on_time(self):
+        self.replayer.start(MOTION)
+        self.assertEqual(self.arm.calls, [("kneel", 0.0), ("arm", 80, 30), ("claw", 0)])
+        self.clock.now += 1.4  # 0.4 s after the 1 s settle
+        self.assertIsNone(self.replayer.tick())
+        self.assertEqual(len(self.arm.calls), 3)
+        self.clock.now += 0.2
+        self.replayer.tick()
+        self.assertEqual(self.arm.calls[-1], ("arm", 90, 20))
+        self.clock.now += 1.0
+        self.assertEqual(self.replayer.tick(), "done")
+        self.assertEqual(self.arm.calls[-2:], [("claw", 200), ("kneel", 0.5)])
+        self.assertFalse(self.replayer.active)
+
+    def test_replay_skips_unknown_start_pose_and_abort_stops(self):
+        self.replayer.start(dict(MOTION, start={"arm": None, "claw": None, "kneel": 0.0}))
+        self.assertEqual(self.arm.calls, [("kneel", 0.0)])
+        self.replayer.abort()
+        self.clock.now += 10
+        self.assertIsNone(self.replayer.tick())
+        self.assertEqual(len(self.arm.calls), 1)
+
+
+class FakeMessage:
+    def __init__(self, record=0, replay=0, raw=None):
+        self.record, self.replay, self.raw = record, replay, raw or {}
+
+
+class FakeRecorder:
+    def __init__(self, reason=None):
+        self.active, self.reason, self.ticks, self.stopped = False, reason, [], 0
+
+    def start(self, state):
+        if self.reason:
+            return self.reason
+        self.active = True
+        self.session = "/tmp/session"
+        return None
+
+    def tick(self, command, state):
+        self.ticks.append(command)
+        return None
+
+    def stop(self):
+        if not self.active:
+            return None
+        self.active = False
+        self.stopped += 1
+        return {"session": "/tmp/session", "frames": 3, "events": 2, "duration": 1.5}
+
+
+class FakeCam:
+    def __init__(self, error=None):
+        self.error, self.started, self.closed = error, 0, False
+
+    def start(self):
+        if self.error:
+            raise RuntimeError(self.error)
+        self.started += 1
+
+    def close(self):
+        self.closed = True
+
+
+class ControllerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.clock = FakeClock()
+        self.arm = FakeArm()
+        self.replayer = teach.Replayer(self.arm, FakePosture(self.arm.calls), clock=self.clock,
+                                       settle=0)
+        self.recorder = FakeRecorder()
+        self.camera = FakeCam()
+        self.log = []
+        self.teach = teach.TeachController(self.camera, self.recorder, self.replayer, self.root,
+                                           lambda: STATE, self.log.append)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def save_motion(self):
+        (self.root / "20261005-120000").mkdir()
+        (self.root / "20261005-120000" / "motion.json").write_text(json.dumps(MOTION))
+
+    def test_x_toggles_recording_and_ticks_while_recording(self):
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertTrue(self.recorder.active)
+        self.assertEqual(self.camera.started, 1)
+        self.teach.update(FakeMessage(record=1, raw={"x": 1}), manual=True)
+        self.assertEqual(self.recorder.ticks[-1], {"x": 1})
+        self.teach.update(FakeMessage(record=2), manual=False)
+        self.assertFalse(self.recorder.active)
+        self.assertTrue(any("3 frames" in line for line in self.log))
+
+    def test_record_refusal_is_reported(self):
+        self.recorder.reason = "no purple box in view"
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertFalse(self.recorder.active)
+        self.assertTrue(any("no purple box" in line for line in self.log))
+
+    def test_record_reports_camera_failure(self):
+        self.camera.error = "cannot open camera 0"
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertFalse(self.recorder.active)
+        self.assertTrue(any("cannot open camera" in line for line in self.log))
+
+    def test_replay_without_recordings(self):
+        self.assertFalse(self.teach.update(FakeMessage(replay=1), manual=False))
+        self.assertEqual(self.arm.calls, [])
+        self.assertTrue(any("No recording" in line for line in self.log))
+
+    def test_replay_with_corrupt_motion_file(self):
+        (self.root / "20261005-120000").mkdir()
+        (self.root / "20261005-120000" / "motion.json").write_text("{not json")
+        self.assertFalse(self.teach.update(FakeMessage(replay=1), manual=False))
+        self.assertEqual(self.arm.calls, [])
+        self.assertTrue(any("Cannot replay" in line for line in self.log))
+
+    def test_replay_runs_and_manual_input_aborts(self):
+        self.save_motion()
+        self.assertTrue(self.teach.update(FakeMessage(replay=1), manual=False))
+        self.assertFalse(self.teach.update(FakeMessage(replay=1), manual=True))
+        self.assertFalse(self.replayer.active)
+        self.assertTrue(any("aborted" in line for line in self.log))
+
+    def test_replay_and_record_exclude_each_other(self):
+        self.save_motion()
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.teach.update(FakeMessage(record=1, replay=1), manual=False)
+        self.assertFalse(self.replayer.active)
+        self.teach.update(FakeMessage(record=2, replay=1), manual=False)
+        self.teach.update(FakeMessage(record=2, replay=2), manual=False)
+        self.assertTrue(self.replayer.active)
+        self.teach.update(FakeMessage(record=3, replay=2), manual=False)
+        self.assertFalse(self.recorder.active)
+        self.assertTrue(any("ignored" in line for line in self.log))
+
+    def test_watchdog_aborts_replay_and_close_finalises(self):
+        self.save_motion()
+        self.teach.update(FakeMessage(replay=1), manual=False)
+        self.teach.watchdog()
+        self.assertFalse(self.replayer.active)
+        self.teach.update(FakeMessage(replay=1, record=1), manual=False)
+        self.teach.close()
+        self.assertEqual(self.recorder.stopped, 1)
+        self.assertTrue(self.camera.closed)
+
 if __name__ == "__main__":
     unittest.main()

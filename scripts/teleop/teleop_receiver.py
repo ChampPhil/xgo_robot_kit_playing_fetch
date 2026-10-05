@@ -107,6 +107,22 @@ def build_parser():
     parser.add_argument(
         "--kneel-time", type=lambda v: bounded_number(v, minimum=0.5, maximum=10, label="kneel-time"),
         default=2, metavar="SECONDS", help="time from standing to fully knelt (default: 2)")
+    parser.add_argument("--color", choices=("purple", "orange", "light-blue"), default="purple",
+                        help="box colour for the recording reference (default: purple)")
+    parser.add_argument("--teach-dir", default=str(Path.home() / "xgo_teach"),
+                        help="where recordings are stored (default: ~/xgo_teach)")
+    parser.add_argument(
+        "--record-fps", type=lambda v: bounded_number(v, minimum=1, maximum=30, label="record-fps"),
+        default=10, metavar="FPS", help="dataset frames per second (1–30; default: 10)")
+    parser.add_argument(
+        "--min-free-mb", type=lambda v: bounded_number(v, minimum=50, maximum=5000,
+                                                       label="min-free-mb"),
+        default=200, metavar="MB", help="stop recording below this much free disk (default: 200)")
+    parser.add_argument(
+        "--replay-settle", type=lambda v: bounded_number(v, minimum=0, maximum=5,
+                                                         label="replay-settle"),
+        default=1.0, metavar="SECONDS",
+        help="pause after moving to a recording's start pose (default: 1)")
     parser.add_argument(
         "--timeout", type=lambda v: bounded_number(v, minimum=0.1, maximum=2, label="timeout"),
         default=0.5, metavar="SECONDS", help="stop if no command arrives this long (default: 0.5)",
@@ -420,7 +436,7 @@ def latest(lines, line):
 
 
 def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ramp=None,
-        posture=None):
+        posture=None, teach=None):
     """Apply commands until the stream ends; always leaves the robot stopped."""
     try:
         while True:
@@ -439,6 +455,8 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                         arm.idle()
                     if posture is not None:
                         posture.update(0)
+                    if teach is not None:
+                        teach.watchdog()
                     continue
             line = latest(lines, line)
             if line is EOF:
@@ -461,17 +479,22 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
             if ramp is not None:
                 walk = ramp.apply(walk)
             driver.apply(scale(walk, driver.args))
-            if arm is not None:
+            manual = (message.raw.get("enable") is True or arm_command is not None
+                      or kneel != 0)
+            replaying = teach is not None and teach.update(message, manual)
+            if arm is not None and not replaying:
                 if arm_command is None:
                     arm.idle()
                 else:
                     arm.update(arm_command)
             if barker is not None:
                 barker.update(bark)
-            if posture is not None:
+            if posture is not None and not replaying:
                 posture.update(kneel)
     finally:
         driver.stop()
+        if teach is not None:
+            teach.close()
         if posture is not None:
             posture.stand()
 
@@ -506,9 +529,21 @@ def main(argv=None):
         log(f"Ready (battery {battery}%). Limits x={args.max_x} y={args.max_y} turn={args.max_turn}.")
         if not BARK_SOUND.is_file():
             log(f"Bark sound missing at {BARK_SOUND}; B will do nothing.")
-        run(driver, lines, args.timeout, log, first=first,
-            arm=ArmController(dog, args), barker=Barker(log=log),
-            ramp=Ramp(args.ramp, args.ramp_start), posture=Posture(dog, args))
+        import camera as camera_module
+        import teach as teach_module
+        from detect_boxes import detect_boxes
+
+        arm, posture = ArmController(dog, args), Posture(dog, args)
+        cam = camera_module.Camera(0)
+        recorder = teach_module.Recorder(Path(args.teach_dir).expanduser(), cam, detect_boxes,
+                                         args.color, fps=args.record_fps,
+                                         min_free_mb=args.min_free_mb)
+        arm.listener = posture.listener = recorder.on_send
+        controller = teach_module.TeachController(
+            cam, recorder, teach_module.Replayer(arm, posture, settle=args.replay_settle),
+            Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log)
+        run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
+            ramp=Ramp(args.ramp, args.ramp_start), posture=posture, teach=controller)
     finally:
         driver.stop()
         log("Robot stopped.")
