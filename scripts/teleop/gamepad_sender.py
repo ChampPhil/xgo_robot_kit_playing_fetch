@@ -16,7 +16,9 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")  # no window to focus
@@ -56,6 +58,8 @@ def build_parser():
     parser.add_argument("--no-deadman", action="store_true",
                         help="drive without holding LB (sticks must be centred first)")
     parser.add_argument("--yes", action="store_true", help="skip the safety confirmation prompt")
+    parser.add_argument("--video", action="store_true",
+                        help="show the robot camera live in the browser (port 8090)")
     for flag in RECEIVER_FLAGS:
         parser.add_argument(f"--{flag}", metavar="VALUE",
                             help="passed to teleop_receiver.py (see its --help for limits)")
@@ -164,8 +168,17 @@ def remote_command(args):
         value = getattr(args, flag.replace("-", "_"))
         if value is not None:
             receiver += ["--" + flag, value]
+    if args.video:
+        receiver += ["--video-port", str(VIDEO_PORT)]
     # remote_dir is left unquoted so the robot's shell expands "~".
     return f"cd {args.remote_dir} && exec {' '.join(shlex.quote(part) for part in receiver)}"
+
+
+VIDEO_PORT = 8090
+
+
+def video_url(args):
+    return f"http://{args.host.split('@')[-1]}:{VIDEO_PORT}/"
 
 
 def start_ssh(args):
@@ -242,6 +255,10 @@ def main(argv=None):
         except EOFError:
             parser.error("confirmation requires a terminal; use --yes only when it is safe")
     ssh = start_ssh(args)
+    if args.video:
+        url = video_url(args)
+        print(f"Live video: {url} (opens once the robot is ready)", file=sys.stderr)
+        threading.Timer(4.0, webbrowser.open, args=(url,)).start()
     print(("Hold LB to walk" if not args.no_deadman else "Centre the sticks, then walk")
           + "; hold RB to move the arm/claw; LT + D-pad down/up kneels/stands; B barks; "
           "X records, Y replays; "

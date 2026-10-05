@@ -169,6 +169,12 @@ class SenderTests(unittest.TestCase):
                                       records=3, replays=2)
         self.assertEqual((message["record"], message["replay"]), (3, 2))
 
+    def test_video_flag_passes_port_and_url(self):
+        args = sender.build_parser().parse_args(["--video"])
+        self.assertIn("--video-port 8090", sender.remote_command(args))
+        self.assertEqual(sender.video_url(args), "http://100.74.30.90:8090/")
+        self.assertNotIn("--video-port", sender.remote_command(sender.build_parser().parse_args([])))
+
     def test_lt_with_dpad_kneels_and_stands(self):
         arming = sender.Arming(deadman=True)
         kneel = lambda **s: sender.make_message(self.state(**s), arming, 0.1, 0)["kneel"]  # noqa: E731

@@ -107,6 +107,8 @@ def build_parser():
     parser.add_argument(
         "--kneel-time", type=lambda v: bounded_number(v, minimum=0.5, maximum=10, label="kneel-time"),
         default=2, metavar="SECONDS", help="time from standing to fully knelt (default: 2)")
+    parser.add_argument("--video-port", type=int, default=0, metavar="PORT",
+                        help="serve the live camera on the Tailscale address (0 = off)")
     parser.add_argument("--color", choices=("purple", "orange", "light-blue"), default="purple",
                         help="box colour for the recording reference (default: purple)")
     parser.add_argument("--teach-dir", default=str(Path.home() / "xgo_teach"),
@@ -542,8 +544,27 @@ def main(argv=None):
         controller = teach_module.TeachController(
             cam, recorder, teach_module.Replayer(arm, posture, settle=args.replay_settle),
             Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log)
-        run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
-            ramp=Ramp(args.ramp, args.ramp_start), posture=posture, teach=controller)
+        viewer = None
+        if args.video_port:
+            import video
+
+            host = video.tailscale_ipv4()
+            if host is None:
+                log("Live video unavailable: no Tailscale IPv4 address found.")
+            else:
+                try:
+                    viewer = video.VideoServer(cam, host, args.video_port)
+                    viewer.start()
+                    log(f"Live video: {viewer.url}")
+                except (OSError, RuntimeError) as exc:
+                    log(f"Live video unavailable: {exc}.")
+                    viewer = None
+        try:
+            run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
+                ramp=Ramp(args.ramp, args.ramp_start), posture=posture, teach=controller)
+        finally:
+            if viewer is not None:
+                viewer.close()
     finally:
         driver.stop()
         log("Robot stopped.")
