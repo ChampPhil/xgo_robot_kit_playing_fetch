@@ -123,7 +123,8 @@ class SenderTests(unittest.TestCase):
                                  CONTROLLER_AXIS_RIGHTX=2, CONTROLLER_BUTTON_LEFTSHOULDER=9,
                                  CONTROLLER_BUTTON_RIGHTSHOULDER=10, CONTROLLER_BUTTON_B=1,
                                  CONTROLLER_BUTTON_START=6, CONTROLLER_AXIS_TRIGGERLEFT=4,
-                                 CONTROLLER_BUTTON_DPAD_UP=11, CONTROLLER_BUTTON_DPAD_DOWN=12)
+                                 CONTROLLER_BUTTON_DPAD_UP=11, CONTROLLER_BUTTON_DPAD_DOWN=12,
+                                 CONTROLLER_BUTTON_X=2, CONTROLLER_BUTTON_Y=3)
         reads = {"n": 0}
         real_read = sender.read_sticks
 
@@ -142,11 +143,11 @@ class SenderTests(unittest.TestCase):
             ssh.wait()
         self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True,
                                               "arm": False, "ax": 0.0, "az": 0.0, "claw": 0.0,
-                                              "bark": 0, "kneel": 0})
+                                              "bark": 0, "kneel": 0, "record": 0, "replay": 0})
 
     def state(self, **overrides):
         state = dict(left_x=0.0, left_y=0.0, right_x=0.0, lb=False, rb=False, b=False, start=False,
-                     lt=False, dpad_up=False, dpad_down=False)
+                     lt=False, dpad_up=False, dpad_down=False, x=False, y=False)
         state.update(overrides)
         return state
 
@@ -156,10 +157,15 @@ class SenderTests(unittest.TestCase):
                                       arming, 0.1, barks=2)
         self.assertEqual(message, {"x": 1.0, "y": -1.0, "yaw": -1.0, "enable": False,
                                    "arm": True, "ax": 1.0, "az": 1.0, "claw": 1.0, "bark": 2,
-                                   "kneel": 0})
+                                   "kneel": 0, "record": 0, "replay": 0})
         message = sender.make_message(self.state(left_x=-1, left_y=1, right_x=-1, rb=True),
                                       arming, 0.1, barks=2)
         self.assertEqual((message["ax"], message["az"], message["claw"]), (-1.0, -1.0, -1.0))
+
+    def test_x_and_y_press_counters_are_sent(self):
+        message = sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0,
+                                      records=3, replays=2)
+        self.assertEqual((message["record"], message["replay"]), (3, 2))
 
     def test_lt_with_dpad_kneels_and_stands(self):
         arming = sender.Arming(deadman=True)
@@ -222,7 +228,8 @@ class ArmBarkRampTests(unittest.TestCase):
         self.arm.update(dict({"ax": 0.0, "az": 0.0, "claw": 0.0}, **command))
 
     def test_arm_mode_overrides_walking(self):
-        walk, arm, _, _ = receiver.parse_message(arm_line(ax=0.5, x=1))
+        message = receiver.parse_message(arm_line(ax=0.5, x=1))
+        walk, arm = message.walk, message.arm
         self.assertEqual(walk, {"x": 0.0, "y": 0.0, "yaw": 0.0})
         self.assertEqual(arm, {"ax": 0.5, "az": 0.0, "claw": 0.0})
 
@@ -370,8 +377,8 @@ class KneelTests(unittest.TestCase):
         self.posture.update(direction)
 
     def test_kneel_parses_and_rejects_bad_values(self):
-        self.assertEqual(receiver.parse_message(line(kneel=1))[3], 1)
-        self.assertEqual(receiver.parse_message(line())[3], 0)
+        self.assertEqual(receiver.parse_message(line(kneel=1)).kneel, 1)
+        self.assertEqual(receiver.parse_message(line()).kneel, 0)
         for bad in (2, 0.5, True, "1"):
             with self.assertRaises(ValueError):
                 receiver.parse_message(line(kneel=bad))
@@ -490,6 +497,18 @@ class ReceiverTests(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             self.run_lines(KeyboardInterrupt(), first=line(x=1))
         self.assertEqual(self.dog.calls, [("x", 12), ("stop",)])
+
+    def test_message_carries_counters_and_raw(self):
+        message = receiver.parse_message(line(record=2, replay=1))
+        self.assertEqual((message.record, message.replay), (2, 1))
+        self.assertEqual(message.raw["record"], 2)
+        self.assertEqual(receiver.parse_message(line()).record, 0)
+
+    def test_bad_counters_are_rejected(self):
+        for key in ("record", "replay"):
+            for bad in (-1, 1.5, True, "1"):
+                with self.assertRaises(ValueError):
+                    receiver.parse_message(line(**{key: bad}))
 
     def test_speed_flags_are_bounded(self):
         parser = receiver.build_parser()

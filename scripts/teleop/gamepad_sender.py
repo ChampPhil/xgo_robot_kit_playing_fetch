@@ -5,7 +5,7 @@ stick left/right turns. Release LB and the robot stops.
 Hold RB for arm mode (walking stops): left stick up/down raises/lowers the arm,
 right/left reaches out/in; right stick right/left closes/opens the claw.
 Hold LT and press D-pad down/up to kneel the front down / stand back up.
-B barks. START or Ctrl+C quits. Commands go to teleop_receiver.py on the robot through
+B barks. X starts/stops recording a pickup, Y replays it. START or Ctrl+C quits. Commands go to teleop_receiver.py on the robot through
 the stdin of an SSH session, so the existing Tailscale SSH access is the link.
 """
 
@@ -85,7 +85,7 @@ def make_command(left_x, left_y, right_x, enable, deadzone):
     return command
 
 
-def make_message(state, arming, deadzone, barks):
+def make_message(state, arming, deadzone, barks, records=0, replays=0):
     """Full command line: walking (LB), arm mode (RB, which overrides walking) and barks."""
     command = make_command(state["left_x"], state["left_y"], state["right_x"], False, deadzone)
     command["enable"] = arming.enable(command, state["lb"]) and not state["rb"]
@@ -96,6 +96,8 @@ def make_message(state, arming, deadzone, barks):
                        ("claw", state["right_x"])):
         command[key] = round(apply_deadzone(value, deadzone), 3) + 0.0 if state["rb"] else 0.0
     command["bark"] = barks
+    command["record"] = records  # X presses: toggle recording
+    command["replay"] = replays  # Y presses: replay the latest recording
     # LT + D-pad: kneel. Independent of LB/RB, so the arm still works while knelt.
     command["kneel"] = (int(state["dpad_down"]) - int(state["dpad_up"])) if state["lt"] else 0
     return command
@@ -146,6 +148,8 @@ def read_sticks(pygame, pad):
         "lb": button(pygame.CONTROLLER_BUTTON_LEFTSHOULDER),
         "rb": button(pygame.CONTROLLER_BUTTON_RIGHTSHOULDER),
         "b": button(pygame.CONTROLLER_BUTTON_B),
+        "x": button(pygame.CONTROLLER_BUTTON_X),
+        "y": button(pygame.CONTROLLER_BUTTON_Y),
         "start": button(pygame.CONTROLLER_BUTTON_START),
         # The F310's triggers are digital in D mode; SDL reports them as 0 or full-scale axes.
         "lt": pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERLEFT) > AXIS_MAX // 2,
@@ -188,7 +192,8 @@ def status_line(command):
 def stream(pygame, pad, out, args, ssh=None):
     arming = Arming(deadman=not args.no_deadman)
     period = 1.0 / args.rate
-    barks, b_was_down = 0, False
+    presses = {"b": 0, "x": 0, "y": 0}
+    was_down = dict.fromkeys(presses, False)
     next_tick = time.monotonic()
     while True:
         if ssh is not None and ssh.poll() is not None:
@@ -196,10 +201,12 @@ def stream(pygame, pad, out, args, ssh=None):
         state = read_sticks(pygame, pad)
         if state["start"]:
             return
-        if state["b"] and not b_was_down:
-            barks += 1  # a counter, so a skipped line cannot lose a press
-        b_was_down = state["b"]
-        command = make_message(state, arming, args.deadzone, barks)
+        for button in presses:  # counters, so a skipped line cannot lose a press
+            if state[button] and not was_down[button]:
+                presses[button] += 1
+            was_down[button] = state[button]
+        command = make_message(state, arming, args.deadzone, presses["b"],
+                               records=presses["x"], replays=presses["y"])
         out.write(json.dumps(command) + "\n")
         out.flush()
         if ssh is not None:
@@ -237,6 +244,7 @@ def main(argv=None):
     ssh = start_ssh(args)
     print(("Hold LB to walk" if not args.no_deadman else "Centre the sticks, then walk")
           + "; hold RB to move the arm/claw; LT + D-pad down/up kneels/stands; B barks; "
+          "X records, Y replays; "
           "START or Ctrl+C quits.", file=sys.stderr)
     try:
         stream(pygame, pad, ssh.stdin, args, ssh)

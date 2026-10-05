@@ -26,6 +26,7 @@ import threading
 import time
 from importlib import import_module
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "sensor_monitor"))
 
@@ -123,19 +124,34 @@ def axis_value(message, axis):
     return max(-1.0, min(1.0, float(value)))
 
 
+class Message(NamedTuple):
+    walk: dict
+    arm: Optional[dict]
+    bark: int
+    kneel: int
+    record: int
+    replay: int
+    raw: dict
+
+
+def counter(message, key):
+    value = message.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
+    return value
+
+
 def parse_message(line):
-    """Return (walk, arm, bark, kneel). Raises ValueError on bad input.
+    """Parse one JSON command line into a Message. Raises ValueError on bad input.
 
     walk is {axis: -1..1}, all zero unless enable is true and arm mode is off.
-    arm is {ax, az, claw: -1..1} in arm mode, else None. bark is the press counter.
-    kneel is 1 (kneel down), -1 (stand up) or 0.
+    arm is {ax, az, claw: -1..1} in arm mode, else None. bark/record/replay are press
+    counters. kneel is 1 (kneel down), -1 (stand up) or 0.
     """
     message = json.loads(line)
     if not isinstance(message, dict):
         raise ValueError("command must be a JSON object")
-    bark = message.get("bark", 0)
-    if isinstance(bark, bool) or not isinstance(bark, int) or bark < 0:
-        raise ValueError("bark must be a non-negative integer")
+    bark, record, replay = (counter(message, key) for key in ("bark", "record", "replay"))
     kneel = message.get("kneel", 0)
     if isinstance(kneel, bool) or kneel not in (-1, 0, 1):
         raise ValueError("kneel must be -1, 0 or 1")
@@ -145,12 +161,12 @@ def parse_message(line):
     walk = dict.fromkeys(AXES, 0.0)
     if message.get("enable") is True and arm is None:
         walk = {axis: axis_value(message, axis) for axis in AXES}
-    return walk, arm, bark, kneel
+    return Message(walk, arm, bark, kneel, record, replay, message)
 
 
 def parse_command(line):
     """Walking part of a message only (see parse_message)."""
-    return parse_message(line)[0]
+    return parse_message(line).walk
 
 
 def scale(command, args):
@@ -395,7 +411,9 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                 log("Command stream ended; stopping.")
                 return
             try:
-                walk, arm_command, bark, kneel = parse_message(line)
+                message = parse_message(line)
+                walk, arm_command, bark, kneel = (message.walk, message.arm, message.bark,
+                                                  message.kneel)
             except ValueError as exc:
                 log(f"Bad command ({exc}); stopping.")
                 driver.stop()
