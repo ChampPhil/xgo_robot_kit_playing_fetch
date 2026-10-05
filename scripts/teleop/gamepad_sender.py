@@ -178,13 +178,15 @@ VIDEO_PORT = 8090
 
 
 def video_url(args):
-    return f"http://{args.host.split('@')[-1]}:{VIDEO_PORT}/"
+    return f"http://localhost:{VIDEO_PORT}/"  # forwarded through the SSH session
 
 
 def start_ssh(args):
+    # The tailnet only allows SSH to the robot, so live video is forwarded inside the session.
+    tunnel = ["-L", f"{VIDEO_PORT}:127.0.0.1:{VIDEO_PORT}"] if args.video else []
     return subprocess.Popen(
         ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-         "-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=3",
+         "-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=3", *tunnel,
          args.host, remote_command(args)],
         stdin=subprocess.PIPE,
         text=True,

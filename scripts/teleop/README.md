@@ -64,9 +64,12 @@ recording takes roughly 15–20 MB.
 
 ## Live video
 
-`gamepad_sender.py --video` serves the robot camera at `http://100.74.30.90:8090/` (bound to the
-robot's Tailscale address only) and opens it in your browser. It shares the camera with
-recording. The old camera stream (`test_xgo_connectivity`) must not be running.
+`gamepad_sender.py --video` shows the robot camera at `http://localhost:8090/` and opens it in
+your browser. The tailnet allows only SSH from this computer to the robot, so the receiver
+serves video on the robot's loopback (`127.0.0.1:8090`) and the sender forwards it through its
+SSH session (`ssh -L 8090:127.0.0.1:8090`); nobody else on the network can view it. It shares
+the camera with recording. The old camera stream (`test_xgo_connectivity`) must not be running.
+If port 8090 is busy on this computer, SSH prints a warning and driving still works.
 
 ## Setup (computer side only)
 

@@ -108,7 +108,8 @@ def build_parser():
         "--kneel-time", type=lambda v: bounded_number(v, minimum=0.5, maximum=10, label="kneel-time"),
         default=2, metavar="SECONDS", help="time from standing to fully knelt (default: 2)")
     parser.add_argument("--video-port", type=int, default=0, metavar="PORT",
-                        help="serve the live camera on the Tailscale address (0 = off)")
+                        help="serve the live camera on the robot's loopback for an SSH tunnel "
+                             "(0 = off)")
     parser.add_argument("--color", choices=("purple", "orange", "light-blue"), default="purple",
                         help="box colour for the recording reference (default: purple)")
     parser.add_argument("--teach-dir", default=str(Path.home() / "xgo_teach"),
@@ -509,6 +510,21 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                 posture.stand()
 
 
+def start_viewer(cam, port, log):
+    """Serve live video on the robot's loopback only; the sender reaches it via an SSH tunnel
+    (the tailnet allows SSH to the robot but not other ports)."""
+    import video
+
+    try:
+        viewer = video.VideoServer(cam, video.LOCAL_HOST, port)
+        viewer.start()
+    except (OSError, RuntimeError) as exc:
+        log(f"Live video unavailable: {exc}.")
+        return None
+    log(f"Live video ready on the robot at {viewer.url} (tunnelled to your computer).")
+    return viewer
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -553,21 +569,7 @@ def main(argv=None):
         controller = teach_module.TeachController(
             cam, recorder, teach_module.Replayer(arm, posture, settle=args.replay_settle),
             Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log)
-        viewer = None
-        if args.video_port:
-            import video
-
-            host = video.tailscale_ipv4()
-            if host is None:
-                log("Live video unavailable: no Tailscale IPv4 address found.")
-            else:
-                try:
-                    viewer = video.VideoServer(cam, host, args.video_port)
-                    viewer.start()
-                    log(f"Live video: {viewer.url}")
-                except (OSError, RuntimeError) as exc:
-                    log(f"Live video unavailable: {exc}.")
-                    viewer = None
+        viewer = start_viewer(cam, args.video_port, log) if args.video_port else None
         try:
             run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
                 ramp=Ramp(args.ramp, args.ramp_start), posture=posture, teach=controller)

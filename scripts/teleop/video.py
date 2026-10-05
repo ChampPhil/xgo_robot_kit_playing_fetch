@@ -1,6 +1,9 @@
-"""Live MJPEG view of the robot camera, served only on the robot's Tailscale address."""
+"""Live MJPEG view of the robot camera, served only on the robot's loopback address.
 
-import subprocess
+The tailnet lets the Mac reach the robot over SSH but not other ports, so
+gamepad_sender.py --video forwards a local port through its SSH session to here.
+"""
+
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,14 +13,7 @@ PAGE = (b"<!doctype html><title>XGO camera</title>"
         b"<img src=\"/stream\" style='width:100%;height:100vh;object-fit:contain'></body>")
 
 
-def tailscale_ipv4(run=subprocess.run):
-    """The robot's Tailscale IPv4 address, or None if Tailscale is unavailable."""
-    try:
-        result = run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    lines = result.stdout.split() if result.returncode == 0 else []
-    return lines[0] if lines else None
+LOCAL_HOST = "127.0.0.1"
 
 
 class VideoServer:
