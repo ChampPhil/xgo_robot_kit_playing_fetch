@@ -20,6 +20,8 @@ the robot turns them into `move_x` / `move_y` / `turn` calls.
 | ↳ Right stick right / left | Close / open the claw |
 | **LT (hold) + D-pad down / up** | Kneel the front down toward the floor / stand back up |
 | **B** | Bark (robot speaker) |
+| **X** | Start / stop recording a pickup (needs one fully visible box of `--color`) |
+| **Y** | Replay the latest recorded pickup; any stick, LB/RB or kneel press aborts |
 | START, or Ctrl+C | Stop and quit |
 
 Arm mode is **speed** control: hold a stick and the arm keeps moving, centre it
@@ -43,6 +45,28 @@ the body brings the whole arm reach ring closer to the floor. Quitting returns t
 robot to standing. Body height while standing is assumed to be 85 mm (xgolib's
 neutral value); if the first kneel press makes the body jump, adjust
 `--stand-height`.
+
+## Recording and replaying a pickup
+
+Put the box directly in front of the robot, press **X**, pick it up with the controller,
+and press **X** again. Each recording is a folder in `~/xgo_teach/<date-time>/` on the robot:
+
+| File | Contents |
+| --- | --- |
+| `reference.jpg`, `reference.json` | The camera view and box position/size when recording started |
+| `motion.json` | Arm, claw and kneel targets with timings — what **Y** replays (walking is never replayed) |
+| `motion_events.jsonl` | The same events, written as they happen (survives a power cut) |
+| `frames/*.jpg`, `dataset.jsonl` | Video frames (10 fps) with the gamepad command, robot state and box detection at each frame — training data |
+
+Recording refuses to start unless exactly one box of `--color` (default purple) is fully in view,
+and stops by itself when free disk drops below `--min-free-mb` (200). At 640×480 a minute of
+recording takes roughly 15–20 MB.
+
+## Live video
+
+`gamepad_sender.py --video` serves the robot camera at `http://100.74.30.90:8090/` (bound to the
+robot's Tailscale address only) and opens it in your browser. It shares the camera with
+recording. The old camera stream (`test_xgo_connectivity`) must not be running.
 
 ## Setup (computer side only)
 
