@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime
 from pathlib import Path
 
@@ -175,6 +176,50 @@ class RecorderTests(unittest.TestCase):
         self.assertFalse(self.recorder.active)
         self.assertTrue((self.session() / "motion.json").exists())
 
+    def test_write_failure_during_recording_stops_cleanly(self):
+        self.recorder.start(STATE)
+
+        def full(frame):
+            raise OSError(28, "No space left on device")
+
+        self.recorder.encode = full
+        reason = self.recorder.tick({}, STATE)
+        self.assertIn("No space left", reason)
+        self.assertFalse(self.recorder.active)
+        self.assertTrue((self.session() / "motion.json").exists())
+
+    def test_motion_file_failure_still_ends_the_session(self):
+        self.recorder.start(STATE)
+        with unittest.mock.patch.object(teach, "write_json_atomic",
+                                        side_effect=OSError(28, "No space left on device")):
+            summary = self.recorder.stop()
+        self.assertIn("No space left", summary["error"])
+        self.assertFalse(self.recorder.active)
+        self.assertTrue(self.recorder.events_file.closed)
+
+    def test_start_failure_on_disk_error_is_reported(self):
+        def full(frame):
+            raise OSError(28, "No space left on device")
+
+        self.recorder.encode = full
+        self.assertIn("No space left", self.recorder.start(STATE))
+        self.assertFalse(self.recorder.active)
+
+    def test_events_are_fsynced_and_dataset_fsynced_periodically(self):
+        synced = []
+        with unittest.mock.patch.object(teach.os, "fsync", side_effect=synced.append):
+            self.recorder.start(STATE)
+            synced.clear()
+            self.recorder.on_send("arm", [90, 30])
+            self.assertIn(self.recorder.events_file.fileno(), synced)
+            synced.clear()
+            for _ in range(30):  # 3 s of frames at 10 fps
+                self.recorder.tick({}, STATE)
+                self.clock.now += 0.1
+                self.camera.new_frame()
+            dataset_syncs = synced.count(self.recorder.dataset_file.fileno())
+            self.assertTrue(2 <= dataset_syncs <= 4, dataset_syncs)
+
     def test_two_sessions_in_one_second_get_distinct_folders(self):
         self.recorder.start(STATE)
         self.recorder.stop()
@@ -303,9 +348,10 @@ class FakeCam:
     def __init__(self, error=None):
         self.error, self.started, self.closed = error, 0, False
 
-    def start(self):
-        if self.error:
-            raise RuntimeError(self.error)
+    def start(self, timeout=3.0):
+        raise AssertionError("the control loop must never block on the camera")
+
+    def start_async(self):
         self.started += 1
 
     def close(self):
@@ -351,6 +397,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_record_reports_camera_failure(self):
         self.camera.error = "cannot open camera 0"
+        self.recorder.reason = "no camera frame"
         self.teach.update(FakeMessage(record=1), manual=False)
         self.assertFalse(self.recorder.active)
         self.assertTrue(any("cannot open camera" in line for line in self.log))
@@ -366,6 +413,27 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(self.teach.update(FakeMessage(replay=1), manual=False))
         self.assertEqual(self.arm.calls, [])
         self.assertTrue(any("Cannot replay" in line for line in self.log))
+
+    def test_record_while_camera_warms_up_says_so(self):
+        self.recorder.reason = "no camera frame"
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertTrue(any("press X again" in line for line in self.log))
+
+    def test_replay_refused_during_manual_input_without_moving(self):
+        self.save_motion()
+        self.assertFalse(self.teach.update(FakeMessage(replay=1), manual=True))
+        self.assertEqual(self.arm.calls, [])
+        self.assertFalse(self.replayer.active)
+        self.assertTrue(any("release" in line for line in self.log))
+
+    def test_close_closes_camera_even_if_saving_fails(self):
+        def broken_stop():
+            raise OSError(28, "No space left on device")
+
+        self.recorder.stop = broken_stop
+        with self.assertRaises(OSError):
+            self.teach.close()
+        self.assertTrue(self.camera.closed)
 
     def test_replay_runs_and_manual_input_aborts(self):
         self.save_motion()

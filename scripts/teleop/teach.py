@@ -49,6 +49,15 @@ def encode_jpeg(frame):
     return data.tobytes()
 
 
+def fsync_dir(path):
+    """Make a just-created or renamed file's directory entry survive a power cut."""
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def write_json_atomic(path, data):
     temporary = path.with_suffix(path.suffix + ".tmp")
     with open(temporary, "w") as handle:
@@ -105,24 +114,34 @@ class Recorder:
         features, reason = box_features(self.detect(frame), self.color, frame.shape)
         if reason:
             return reason
-        self.root.mkdir(parents=True, exist_ok=True)
-        name = self.now().strftime("%Y%m%d-%H%M%S")
-        session, suffix = self.root / name, 2
-        while session.exists():
-            session, suffix = self.root / f"{name}-{suffix}", suffix + 1
-        (session / "frames").mkdir(parents=True)
-        (session / "reference.jpg").write_bytes(self.encode(frame))
-        write_json_atomic(session / "reference.json", {
-            "version": 1, "color": self.color, "features": features, "state": state,
-            "created": self.now().isoformat(timespec="seconds")})
-        self.events_file = open(session / "motion_events.jsonl", "a")
-        self.dataset_file = open(session / "dataset.jsonl", "a")
+        files = []
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            name = self.now().strftime("%Y%m%d-%H%M%S")
+            session, suffix = self.root / name, 2
+            while session.exists():
+                session, suffix = self.root / f"{name}-{suffix}", suffix + 1
+            (session / "frames").mkdir(parents=True)
+            (session / "reference.jpg").write_bytes(self.encode(frame))
+            write_json_atomic(session / "reference.json", {
+                "version": 1, "color": self.color, "features": features, "state": state,
+                "created": self.now().isoformat(timespec="seconds")})
+            files.append(open(session / "motion_events.jsonl", "a"))
+            files.append(open(session / "dataset.jsonl", "a"))
+            fsync_dir(session)
+            fsync_dir(self.root)
+        except OSError as exc:  # e.g. disk full: no session (it has no motion.json anyway)
+            for handle in files:
+                handle.close()
+            return f"cannot write recording ({exc})"
+        self.events_file, self.dataset_file = files
         self.start_state = {key: state[key] for key in MOTION_KINDS}
         self.events = []
         self.frames = 0
         self.started = self.clock()
         self.last_frame_time = None
         self.last_stamp = None
+        self.last_sync = self.started
         self.session = session
         return None
 
@@ -135,8 +154,12 @@ class Recorder:
             return
         event = {"t": self.elapsed(), kind: value}
         self.events.append(event)
-        self.events_file.write(json.dumps(event) + "\n")
-        self.events_file.flush()
+        try:
+            self.events_file.write(json.dumps(event) + "\n")
+            self.events_file.flush()
+            os.fsync(self.events_file.fileno())  # few, small, and the replayable part
+        except OSError:
+            pass  # the in-memory list still reaches motion.json at stop
 
     def tick(self, command, state):
         """Called once per received gamepad message; returns a stop reason or None."""
@@ -148,18 +171,25 @@ class Recorder:
             return None
         reason = self.low_disk()
         if reason:
-            self.stop()
+            self.stopped_summary = self.stop()
             return reason
         frame, stamp, _ = self.fresh_frame()
         if frame is None or stamp == self.last_stamp:
             return None
         name = "frames/{:06d}.jpg".format(self.frames)
-        (self.session / name).write_bytes(self.encode(frame))
-        features, _ = box_features(self.detect(frame), self.color, frame.shape)
-        self.dataset_file.write(json.dumps({
-            "i": self.frames, "t": self.elapsed(), "frame": name, "command": command,
-            "state": state, "detection": features}) + "\n")
-        self.dataset_file.flush()
+        try:
+            (self.session / name).write_bytes(self.encode(frame))
+            features, _ = box_features(self.detect(frame), self.color, frame.shape)
+            self.dataset_file.write(json.dumps({
+                "i": self.frames, "t": self.elapsed(), "frame": name, "command": command,
+                "state": state, "detection": features}) + "\n")
+            self.dataset_file.flush()
+            if now - self.last_sync >= 1.0:  # bound what a power cut can lose
+                os.fsync(self.dataset_file.fileno())
+                self.last_sync = now
+        except OSError as exc:
+            self.stopped_summary = self.stop()
+            return f"write failed ({exc})"
         self.frames += 1
         self.last_frame_time = now
         self.last_stamp = stamp
@@ -170,15 +200,23 @@ class Recorder:
         if not self.active:
             return None
         duration = self.elapsed()
-        write_json_atomic(self.session / "motion.json", {
-            "version": 1, "color": self.color, "start": self.start_state,
-            "duration": duration, "events": self.events})
-        self.events_file.close()
-        self.dataset_file.close()
-        summary = {"session": str(self.session), "frames": self.frames,
-                   "events": len(self.events), "duration": duration}
-        self.session = None
-        return summary
+        error = None
+        try:
+            write_json_atomic(self.session / "motion.json", {
+                "version": 1, "color": self.color, "start": self.start_state,
+                "duration": duration, "events": self.events})
+            fsync_dir(self.session)
+        except OSError as exc:
+            error = f"motion.json not saved ({exc}); motion_events.jsonl has the events"
+        finally:
+            for handle in (self.events_file, self.dataset_file):
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            session, self.session = self.session, None
+        return {"session": str(session), "frames": self.frames, "events": len(self.events),
+                "duration": duration, "error": error}
 
 
 def latest_session(root):
@@ -278,7 +316,11 @@ class TeachController:
         if self.pressed("record", message.record):
             self.toggle_recording()
         if self.pressed("replay", message.replay):
-            self.start_replay()
+            if manual:  # starting would move the arm/kneel only to abort on the same tick
+                self.log("Replay needs the sticks centred and LB/RB/LT released; "
+                         "release them and press Y again.")
+            else:
+                self.start_replay()
         if self.replayer.active:
             if manual:
                 self.replayer.abort()
@@ -291,6 +333,7 @@ class TeachController:
             reason = self.recorder.tick(message.raw, self.state())
             if reason:
                 self.log(f"Recording stopped: {reason}.")
+                self.report(getattr(self.recorder, "stopped_summary", None))
         return False
 
     def toggle_recording(self):
@@ -298,16 +341,12 @@ class TeachController:
             self.log("Record button ignored during replay.")
             return
         if self.recorder.active:
-            summary = self.recorder.stop()
-            self.log("Recording saved: {session} ({frames} frames, {events} motion events, "
-                     "{duration:.1f} s).".format(**summary))
+            self.report(self.recorder.stop())
             return
-        try:
-            self.camera.start()
-        except RuntimeError as exc:
-            self.log(f"Cannot record: {exc}.")
-            return
+        self.camera.start_async()  # never blocks the control loop
         reason = self.recorder.start(self.state())
+        if reason == "no camera frame":
+            reason = self.camera.error or "camera is starting; press X again in a moment"
         if reason:
             self.log(f"Cannot record: {reason}.")
         else:
@@ -334,9 +373,22 @@ class TeachController:
             self.replayer.abort()
             self.log("Replay aborted (no commands).")
 
+    def report(self, summary):
+        if summary is None:
+            return
+        self.log("Recording saved: {session} ({frames} frames, {events} motion events, "
+                 "{duration:.1f} s).".format(**summary))
+        if summary.get("error"):
+            self.log(f"Warning: {summary['error']}.")
+
     def close(self):
-        self.replayer.abort()
-        summary = self.recorder.stop()
-        if summary:
-            self.log("Recording saved: {session} ({frames} frames).".format(**summary))
-        self.camera.close()
+        """Finish any recording, then always release the camera."""
+        try:
+            self.replayer.abort()
+            summary = self.recorder.stop()
+            try:
+                self.report(summary)
+            except OSError:
+                pass  # stderr may be gone after an SSH drop
+        finally:
+            self.camera.close()

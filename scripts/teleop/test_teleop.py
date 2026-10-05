@@ -550,6 +550,30 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(message.raw["record"], 2)
         self.assertEqual(receiver.parse_message(line()).record, 0)
 
+    def test_manual_means_real_input(self):
+        self.assertFalse(receiver.parse_message(line(enable=True)).manual)  # LB, sticks centred
+        self.assertTrue(receiver.parse_message(line(enable=False, x=0.5)).manual)
+        self.assertTrue(receiver.parse_message(line(enable=False, yaw=-1)).manual)
+        self.assertTrue(receiver.parse_message(arm_line()).manual)  # RB held
+        self.assertTrue(receiver.parse_message(line(enable=False, kneel=1)).manual)
+        with self.assertRaises(ValueError):
+            receiver.parse_message(line(enable=False, x="fast"))
+
+    def test_stand_still_runs_when_teach_close_fails(self):
+        events = []
+
+        def broken_close():
+            raise OSError(28, "No space left on device")
+
+        teach_stub = SimpleNamespace(update=lambda message, manual: False,
+                                     watchdog=lambda: None, close=broken_close)
+        posture = receiver.Posture(self.dog, self.args, clock=FakeClock())
+        posture.stand = lambda: events.append("stand")
+        receiver.run(self.driver, Paced(line(), receiver.EOF), 0.5, self.log.append,
+                     posture=posture, teach=teach_stub)
+        self.assertEqual(events, ["stand"])
+        self.assertTrue(any("No space left" in entry for entry in self.log))
+
     def test_bad_counters_are_rejected(self):
         for key in ("record", "replay"):
             for bad in (-1, 1.5, True, "1"):
@@ -576,7 +600,7 @@ class ReceiverTests(unittest.TestCase):
         posture = receiver.Posture(dog, args, clock=clock)
         driver = receiver.Driver(dog, args)
         frame = __import__("numpy").zeros((240, 320, 3), dtype="uint8")
-        camera = SimpleNamespace(start=lambda: None, close=lambda: None,
+        camera = SimpleNamespace(start_async=lambda: None, close=lambda: None, error=None,
                                  latest=lambda: (frame, clock.now))
         box = {"bbox": [140, 100, 40, 40], "center": [160, 120], "area_px": 1600}
         recorder = teach.Recorder(Path(tmp.name), camera, lambda f: {"purple": [box]}, "purple",

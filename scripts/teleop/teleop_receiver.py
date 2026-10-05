@@ -150,6 +150,7 @@ class Message(NamedTuple):
     record: int
     replay: int
     raw: dict
+    manual: bool  # the operator is touching a stick, LB/RB arm mode or the kneel combo
 
 
 def counter(message, key):
@@ -176,10 +177,12 @@ def parse_message(line):
     arm = None
     if message.get("arm") is True:
         arm = {axis: axis_value(message, axis) for axis in ARM_AXES}
+    sticks = {axis: axis_value(message, axis) for axis in AXES}
     walk = dict.fromkeys(AXES, 0.0)
     if message.get("enable") is True and arm is None:
-        walk = {axis: axis_value(message, axis) for axis in AXES}
-    return Message(walk, arm, bark, kneel, record, replay, message)
+        walk = sticks
+    manual = any(sticks.values()) or arm is not None or kneel != 0
+    return Message(walk, arm, bark, kneel, record, replay, message, manual)
 
 
 def parse_command(line):
@@ -481,9 +484,7 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
             if ramp is not None:
                 walk = ramp.apply(walk)
             driver.apply(scale(walk, driver.args))
-            manual = (message.raw.get("enable") is True or arm_command is not None
-                      or kneel != 0)
-            replaying = teach is not None and teach.update(message, manual)
+            replaying = teach is not None and teach.update(message, message.manual)
             if arm is not None and not replaying:
                 if arm_command is None:
                     arm.idle()
@@ -495,10 +496,17 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                 posture.update(kneel)
     finally:
         driver.stop()
-        if teach is not None:
-            teach.close()
-        if posture is not None:
-            posture.stand()
+        try:
+            if teach is not None:
+                teach.close()
+        except Exception as exc:  # a recording problem must never stop the robot standing up
+            try:
+                log(f"Recording shutdown failed: {exc}")
+            except OSError:
+                pass
+        finally:
+            if posture is not None:
+                posture.stand()
 
 
 def main(argv=None):
@@ -537,6 +545,7 @@ def main(argv=None):
 
         arm, posture = ArmController(dog, args), Posture(dog, args)
         cam = camera_module.Camera(0)
+        cam.start_async()  # warm up in the background so X is ready without blocking
         recorder = teach_module.Recorder(Path(args.teach_dir).expanduser(), cam, detect_boxes,
                                          args.color, fps=args.record_fps,
                                          min_free_mb=args.min_free_mb)
