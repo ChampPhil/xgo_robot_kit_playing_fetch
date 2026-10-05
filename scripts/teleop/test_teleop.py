@@ -298,6 +298,24 @@ class ArmBarkRampTests(unittest.TestCase):
                                                             self.args.arm_home_z)
                         <= receiver.ARM_REACH[1])
 
+    def test_set_pose_and_claw_send_and_notify(self):
+        heard = []
+        self.arm.listener = lambda kind, value: heard.append((kind, value))
+        self.arm.set_pose(100, 20)
+        self.arm.set_claw(200)
+        self.arm.set_pose(100, 20)  # unchanged: nothing resent
+        self.assertEqual(self.dog.calls, [("arm", 100, 20), ("claw", 200)])
+        self.assertEqual(heard, [("arm", [100, 20]), ("claw", 200)])
+        self.tick(0, az=1)
+        self.tick(0.1, az=1)  # manual control continues from the set pose
+        self.assertEqual(self.dog.calls[-1], ("arm", 100, 26))
+
+    def test_manual_moves_notify_listener(self):
+        heard = []
+        self.arm.listener = lambda kind, value: heard.append((kind, value))
+        self.tick(0, claw=1)
+        self.assertEqual(heard, [("claw", 128)])
+
     def test_claw_moves_without_touching_arm(self):
         self.tick(0, claw=1)
         self.tick(0.1, claw=1)  # 128 + 17
@@ -427,6 +445,26 @@ class KneelTests(unittest.TestCase):
                      lambda text: None, posture=self.posture)
         self.assertIn(("attitude", "p", 5.0), self.dog.calls)  # routed: level 0.5 was sent
         self.assertEqual(self.dog.calls[-2:], [("attitude", "p", 0), ("translation", "z", 85)])
+
+    def test_set_level_sends_and_notifies(self):
+        heard = []
+        self.posture.listener = lambda kind, value: heard.append((kind, value))
+        self.posture.set_level(0.5)
+        self.assertEqual(self.dog.calls, [("attitude", "p", 5.0), ("translation", "z", 77.5)])
+        self.assertEqual(heard, [("kneel", 0.5)])
+        self.posture.set_level(7)  # clamped
+        self.assertEqual(self.dog.calls[-2:], [("attitude", "p", 10), ("translation", "z", 70)])
+
+    def test_robot_state_snapshot(self):
+        arm = receiver.ArmController(self.dog, self.args, clock=self.clock)
+        driver = receiver.Driver(self.dog, self.args)
+        self.assertEqual(receiver.robot_state(driver, arm, self.posture),
+                         {"arm": None, "claw": None, "kneel": 0.0,
+                          "walk": {"x": 0, "y": 0, "yaw": 0}})
+        arm.set_pose(90, 10)
+        self.posture.set_level(0.25)
+        state = receiver.robot_state(driver, arm, self.posture)
+        self.assertEqual((state["arm"], state["kneel"]), ([90, 10], 0.25))
 
     def test_kneel_flags_are_bounded(self):
         parser = receiver.build_parser()

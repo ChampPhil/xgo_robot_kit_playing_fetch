@@ -244,6 +244,7 @@ class ArmController:
         self.pose = None  # [x, z] once the arm has been commanded
         self.grip = None
         self.sent = {"arm": None, "claw": None}
+        self.listener = None  # called as listener(kind, value) after each send (recording)
 
     def idle(self):
         self.last = None
@@ -265,16 +266,33 @@ class ArmController:
                 self.grip = self.args.claw_start
             self.grip = clamp(self.grip + command["claw"] * self.args.claw_speed * dt,
                               ARM_LIMITS["claw"])
+        self.send()
+
+    def set_pose(self, x, z):
+        """Jump the arm target (used by replay); manual control continues from here."""
+        self.pose = [float(x), float(z)]
+        self.idle()
+        self.send()
+
+    def set_claw(self, value):
+        self.grip = float(clamp(value, ARM_LIMITS["claw"]))
+        self.send()
+
+    def send(self):
         if self.pose is not None:
             target = (int(round(self.pose[0])), int(round(self.pose[1])))
             if target != self.sent["arm"]:
                 self.dog.arm(*target)
                 self.sent["arm"] = target
+                if self.listener:
+                    self.listener("arm", list(target))
         if self.grip is not None:
             target = int(round(self.grip))
             if target != self.sent["claw"]:
                 self.dog.claw(target)
                 self.sent["claw"] = target
+                if self.listener:
+                    self.listener("claw", target)
 
 
 def clamp(value, limits):
@@ -319,6 +337,7 @@ class Posture:
         self.level = 0.0
         self.last = None
         self.sent = None
+        self.listener = None  # called as listener("kneel", level) after each send (recording)
 
     def update(self, direction):
         if not direction or (direction < 0 and self.level <= 0) or (direction > 0 and self.level >= 1):
@@ -328,6 +347,12 @@ class Posture:
         dt = 0.0 if self.last is None else min(now - self.last, MAX_ARM_STEP)
         self.last = now
         self.level = clamp(self.level + direction * dt / self.args.kneel_time, (0.0, 1.0))
+        self.send()
+
+    def set_level(self, level):
+        """Jump to a kneel level (used by replay)."""
+        self.level = clamp(float(level), (0.0, 1.0))
+        self.last = None
         self.send()
 
     def stand(self):
@@ -343,6 +368,15 @@ class Posture:
             self.dog.attitude("p", pitch)  # + is front down (xgolib's floor-pickup demo)
             self.dog.translation("z", height)
             self.sent = (pitch, height)
+            if self.listener:
+                self.listener("kneel", round(self.level, 4))
+
+
+def robot_state(driver, arm, posture):
+    """Snapshot of what has been commanded, for recordings."""
+    return {"arm": list(arm.sent["arm"]) if arm.sent["arm"] else None,
+            "claw": arm.sent["claw"], "kneel": round(posture.level, 4),
+            "walk": dict(driver.current)}
 
 
 class Barker:
