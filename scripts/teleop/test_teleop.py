@@ -126,7 +126,8 @@ class SenderTests(unittest.TestCase):
                                  CONTROLLER_BUTTON_RIGHTSHOULDER=10, CONTROLLER_BUTTON_B=1,
                                  CONTROLLER_BUTTON_START=6, CONTROLLER_AXIS_TRIGGERLEFT=4,
                                  CONTROLLER_BUTTON_DPAD_UP=11, CONTROLLER_BUTTON_DPAD_DOWN=12,
-                                 CONTROLLER_BUTTON_X=2, CONTROLLER_BUTTON_Y=3)
+                                 CONTROLLER_BUTTON_X=2, CONTROLLER_BUTTON_Y=3,
+                                 CONTROLLER_BUTTON_A=0)
         reads = {"n": 0}
         real_read = sender.read_sticks
 
@@ -145,11 +146,12 @@ class SenderTests(unittest.TestCase):
             ssh.wait()
         self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True,
                                               "arm": False, "ax": 0.0, "az": 0.0, "claw": 0.0,
-                                              "bark": 0, "kneel": 0, "record": 0, "replay": 0})
+                                              "bark": 0, "kneel": 0, "record": 0, "replay": 0,
+                                              "align": False})
 
     def state(self, **overrides):
         state = dict(left_x=0.0, left_y=0.0, right_x=0.0, lb=False, rb=False, b=False, start=False,
-                     lt=False, dpad_up=False, dpad_down=False, x=False, y=False)
+                     lt=False, dpad_up=False, dpad_down=False, x=False, y=False, a=False)
         state.update(overrides)
         return state
 
@@ -159,10 +161,28 @@ class SenderTests(unittest.TestCase):
                                       arming, 0.1, barks=2)
         self.assertEqual(message, {"x": 1.0, "y": -1.0, "yaw": -1.0, "enable": False,
                                    "arm": True, "ax": 1.0, "az": 1.0, "claw": 1.0, "bark": 2,
-                                   "kneel": 0, "record": 0, "replay": 0})
+                                   "kneel": 0, "record": 0, "replay": 0, "align": False})
         message = sender.make_message(self.state(left_x=-1, left_y=1, right_x=-1, rb=True),
                                       arming, 0.1, barks=2)
         self.assertEqual((message["ax"], message["az"], message["claw"]), (-1.0, -1.0, -1.0))
+
+    def test_a_held_is_sent_as_align(self):
+        message = sender.make_message(self.state(a=True), sender.Arming(deadman=True), 0.1, 0)
+        self.assertIs(message["align"], True)
+        self.assertIs(sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0)
+                      ["align"], False)
+
+    def test_receiver_options_pass_through(self):
+        args = sender.build_parser().parse_args(
+            ["--color", "orange", "--settle", "1", "--align-motion", "--recalibrate",
+             "--align-turn", "15", "--tol-u", "0.03"])
+        command = sender.remote_command(args)
+        for part in ("--color orange", "--settle 1", "--align-motion", "--recalibrate",
+                     "--align-turn 15", "--tol-u 0.03"):
+            self.assertIn(part, command)
+        plain = sender.remote_command(sender.build_parser().parse_args([]))
+        self.assertNotIn("--align-motion", plain)
+        self.assertNotIn("--recalibrate", plain)
 
     def test_x_and_y_press_counters_are_sent(self):
         message = sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0,
@@ -575,7 +595,7 @@ class ReceiverTests(unittest.TestCase):
         def broken_close():
             raise OSError(28, "No space left on device")
 
-        teach_stub = SimpleNamespace(update=lambda message, manual: False,
+        teach_stub = SimpleNamespace(update=lambda message, manual, blocked=False: False,
                                      watchdog=lambda: None, close=broken_close)
         posture = receiver.Posture(self.dog, self.args, clock=FakeClock())
         posture.stand = lambda: events.append("stand")
@@ -583,6 +603,57 @@ class ReceiverTests(unittest.TestCase):
                      posture=posture, teach=teach_stub)
         self.assertEqual(events, ["stand"])
         self.assertTrue(any("No space left" in entry for entry in self.log))
+
+    def test_align_flag_parses(self):
+        self.assertIs(receiver.parse_message(line(align=True)).align, True)
+        self.assertIs(receiver.parse_message(line()).align, False)
+        self.assertIs(receiver.parse_message(line(align="yes")).align, False)
+
+    def test_leg_stepper_maps_primitives_to_small_fixed_speeds(self):
+        driver = receiver.Driver(self.dog, self.args)
+        legs = receiver.LegStepper(driver, {"turn": 20, "forward": 8, "strafe": 6})
+        legs.step("turn", -0.4)
+        legs.stop()
+        legs.step("forward", 1.0)
+        legs.step("strafe", 0.5)
+        self.assertEqual(self.dog.calls, [("turn", -20), ("stop",), ("x", 8),
+                                          ("x", 0), ("y", 6)])
+
+    def test_aligning_owns_the_legs_and_blocks_x_y(self):
+        calls = []
+        aligner = SimpleNamespace(update=lambda held, manual: calls.append((held, manual)) or held,
+                                  watchdog=lambda: calls.append("watchdog"))
+        teach_calls = []
+        teach_stub = SimpleNamespace(
+            busy=False, update=lambda message, manual, blocked=False:
+            teach_calls.append(blocked) or False, watchdog=lambda: None, close=lambda: None)
+        receiver.run(self.driver, Paced(line(align=True, enable=False, record=1), QUIET,
+                                        receiver.EOF),
+                     0.5, self.log.append, teach=teach_stub, aligner=aligner)
+        self.assertEqual(calls, [(True, False), "watchdog"])
+        self.assertEqual(teach_calls, [True])  # X/Y presses are ignored while aligning
+        self.assertNotIn(("stop",), self.dog.calls[:-1])  # manual walk did not override legs
+
+    def test_align_ignored_while_recording_or_replaying(self):
+        calls = []
+        aligner = SimpleNamespace(update=lambda held, manual: calls.append(held) or held,
+                                  watchdog=lambda: None)
+        teach_stub = SimpleNamespace(busy=True, update=lambda message, manual, blocked=False: False,
+                                     watchdog=lambda: None, close=lambda: None)
+        receiver.run(self.driver, Paced(line(align=True, enable=False), receiver.EOF), 0.5,
+                     self.log.append, teach=teach_stub, aligner=aligner)
+        self.assertEqual(calls, [False])
+
+    def test_align_flags(self):
+        args = receiver.build_parser().parse_args([])
+        self.assertEqual((args.align_motion, args.recalibrate, args.align_step, args.align_turn,
+                          args.align_walk, args.align_strafe, args.tol_u, args.tol_h, args.tol_v,
+                          args.align_max_steps),
+                         (False, False, 0.3, 20, 8, 6, 0.04, 0.08, 0.05, 40))
+        with patch("sys.stderr", io.StringIO()):
+            for argv in (["--align-turn", "100"], ["--tol-u", "0"], ["--align-step", "2"]):
+                with self.assertRaises(SystemExit):
+                    receiver.build_parser().parse_args(argv)
 
     def test_bad_counters_are_rejected(self):
         for key in ("record", "replay"):
@@ -645,7 +716,7 @@ class ReceiverTests(unittest.TestCase):
     def test_run_finalises_recording_on_exit(self):
         events = []
         teach_stub = SimpleNamespace(
-            update=lambda message, manual: False, watchdog=lambda: None,
+            update=lambda message, manual, blocked=False: False, watchdog=lambda: None,
             close=lambda: events.append("close"))
         posture = receiver.Posture(self.dog, self.args, clock=FakeClock())
         posture.stand = lambda: events.append("stand")

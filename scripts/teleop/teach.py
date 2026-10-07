@@ -271,6 +271,18 @@ def load_motion(session):
     return motion
 
 
+def load_reference(root):
+    """{"features", "state"} from the latest finished recording's reference.json, or None."""
+    session = latest_session(root)
+    if session is None:
+        return None
+    try:
+        data = json.loads((session / "reference.json").read_text())
+        return {"features": data["features"], "state": data.get("state") or {}}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 class Replayer:
     """Play a recorded motion through the arm/kneel controllers, driven by tick()."""
 
@@ -336,13 +348,25 @@ class TeachController:
         self.last_moving = None  # last time the legs were walking (the camera shakes)
         self.pending = None  # X pressed; waiting for a steady, usable reference frame
 
+    @property
+    def busy(self):
+        return self.recorder.active or self.replayer.active or self.pending is not None
+
     def pressed(self, key, count):
         new = count > self.seen[key]
         self.seen[key] = count  # also resyncs if a counter ever goes backwards
         return new
 
-    def update(self, message, manual):
-        """Call once per message. Returns True while a replay owns the arm and kneel."""
+    def update(self, message, manual, blocked=False):
+        """Call once per message. Returns True while a replay owns the arm and kneel.
+
+        blocked: alignment is running; X/Y presses are consumed and ignored.
+        """
+        if blocked:
+            for key, label in (("record", "Record"), ("replay", "Replay")):
+                if self.pressed(key, getattr(message, key)):
+                    self.log(f"{label} button ignored while aligning.")
+            return False
         now = self.clock()
         if any((self.state().get("walk") or {}).values()):
             self.last_moving = now

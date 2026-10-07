@@ -349,6 +349,23 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(len(self.arm.calls), 1)
 
 
+class ReferenceTests(unittest.TestCase):
+    def test_load_reference_from_the_latest_finished_recording(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertIsNone(teach.load_reference(root))
+            for name, u in (("20261005-110000", 0.3), ("20261005-120000", 0.6)):
+                (root / name).mkdir()
+                (root / name / "motion.json").write_text(json.dumps(MOTION))
+                (root / name / "reference.json").write_text(json.dumps(
+                    {"version": 1, "features": {"u": u, "v": 0.5, "h": 0.2}, "state": STATE}))
+            reference = teach.load_reference(root)
+            self.assertEqual(reference["features"]["u"], 0.6)
+            self.assertEqual(reference["state"]["arm"], [80, 30])
+            (root / "20261005-120000" / "reference.json").write_text("{broken")
+            self.assertIsNone(teach.load_reference(root))
+
+
 class FakeMessage:
     def __init__(self, record=0, replay=0, raw=None):
         self.record, self.replay, self.raw = record, replay, raw or {}
@@ -534,6 +551,20 @@ class ControllerTests(unittest.TestCase):
         self.teach.update(FakeMessage(record=3, replay=2), manual=False)
         self.assertFalse(self.recorder.active)
         self.assertTrue(any("ignored" in line for line in self.log))
+
+    def test_busy_and_blocked_presses(self):
+        self.assertFalse(self.teach.busy)
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertTrue(self.teach.busy)
+        self.teach.update(FakeMessage(record=2), manual=False)
+        self.assertFalse(self.teach.busy)
+        self.save_motion()
+        self.teach.update(FakeMessage(record=3, replay=1), manual=False, blocked=True)
+        self.assertFalse(self.recorder.active)
+        self.assertFalse(self.replayer.active)
+        self.assertTrue(any("while aligning" in line for line in self.log))
+        self.teach.update(FakeMessage(record=3, replay=1), manual=False)
+        self.assertFalse(self.replayer.active)  # the press was consumed, not deferred
 
     def test_watchdog_aborts_replay_and_close_finalises(self):
         self.save_motion()

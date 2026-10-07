@@ -5,7 +5,8 @@ stick left/right turns. Release LB and the robot stops.
 Hold RB for arm mode (walking stops): left stick up/down raises/lowers the arm,
 right/left reaches out/in; right stick right/left closes/opens the claw.
 Hold LT and press D-pad down/up to kneel the front down / stand back up.
-B barks. X starts/stops recording a pickup, Y replays it. START or Ctrl+C quits. Commands go to teleop_receiver.py on the robot through
+B barks. X starts/stops recording a pickup, Y replays it, hold A to align with it
+(moves only with --align-motion). START or Ctrl+C quits. Commands go to teleop_receiver.py on the robot through
 the stdin of an SSH session, so the existing Tailscale SSH access is the link.
 """
 
@@ -29,7 +30,10 @@ AXIS_MAX = 32767
 # Passed through unchanged to teleop_receiver.py, which validates them.
 RECEIVER_FLAGS = ("max-x", "max-y", "max-turn", "ramp", "ramp-start", "arm-speed", "claw-speed",
                   "arm-home-x", "arm-home-z", "claw-start", "kneel-pitch", "kneel-height",
-                  "stand-height", "kneel-time")
+                  "stand-height", "kneel-time", "color", "settle", "min-sharpness", "record-fps",
+                  "min-free-mb", "replay-settle", "align-step", "align-turn", "align-walk",
+                  "align-strafe", "tol-u", "tol-h", "tol-v", "align-max-steps")
+RECEIVER_SWITCHES = ("align-motion", "recalibrate")
 
 
 def bounded_number(value, *, minimum, maximum, label):
@@ -63,6 +67,9 @@ def build_parser():
     for flag in RECEIVER_FLAGS:
         parser.add_argument(f"--{flag}", metavar="VALUE",
                             help="passed to teleop_receiver.py (see its --help for limits)")
+    for flag in RECEIVER_SWITCHES:
+        parser.add_argument(f"--{flag}", action="store_true",
+                            help="passed to teleop_receiver.py (see its --help)")
     return parser
 
 
@@ -102,6 +109,7 @@ def make_message(state, arming, deadzone, barks, records=0, replays=0):
     command["bark"] = barks
     command["record"] = records  # X presses: toggle recording
     command["replay"] = replays  # Y presses: replay the latest recording
+    command["align"] = state["a"]  # A held: align with the latest recording
     # LT + D-pad: kneel. Independent of LB/RB, so the arm still works while knelt.
     command["kneel"] = (int(state["dpad_down"]) - int(state["dpad_up"])) if state["lt"] else 0
     return command
@@ -152,6 +160,7 @@ def read_sticks(pygame, pad):
         "lb": button(pygame.CONTROLLER_BUTTON_LEFTSHOULDER),
         "rb": button(pygame.CONTROLLER_BUTTON_RIGHTSHOULDER),
         "b": button(pygame.CONTROLLER_BUTTON_B),
+        "a": button(pygame.CONTROLLER_BUTTON_A),
         "x": button(pygame.CONTROLLER_BUTTON_X),
         "y": button(pygame.CONTROLLER_BUTTON_Y),
         "start": button(pygame.CONTROLLER_BUTTON_START),
@@ -168,6 +177,9 @@ def remote_command(args):
         value = getattr(args, flag.replace("-", "_"))
         if value is not None:
             receiver += ["--" + flag, value]
+    for flag in RECEIVER_SWITCHES:
+        if getattr(args, flag.replace("-", "_")):
+            receiver.append("--" + flag)
     if args.video:
         receiver += ["--video-port", str(VIDEO_PORT)]
     # remote_dir is left unquoted so the robot's shell expands "~".
@@ -195,6 +207,8 @@ def start_ssh(args):
 
 
 def status_line(command):
+    if command.get("align"):
+        return "\rALIGN (hold A; release to stop)                                   "
     if command["arm"]:
         return "\rARM    reach {:+.2f}  lift {:+.2f}  claw {:+.2f}  barks {} ".format(
             command["ax"], command["az"], command["claw"], command["bark"])

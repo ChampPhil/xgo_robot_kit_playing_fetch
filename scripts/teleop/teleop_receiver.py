@@ -131,6 +131,23 @@ def build_parser():
         default=50, metavar="VALUE",
         help="reject blurrier reference photos (Laplacian variance; a still frame on the "
              "robot measured ~410; default: 50)")
+    parser.add_argument("--align-motion", action="store_true",
+                        help="let holding A move the robot (otherwise A only reports alignment)")
+    parser.add_argument("--recalibrate", action="store_true",
+                        help="redo the alignment calibration (360° turn) on the first A hold")
+    for flag, default, low, high, help_text in (
+            ("align-step", 0.3, 0.15, 1.0, "seconds per alignment step"),
+            ("align-turn", 20, 5, 60, "turn speed for alignment steps"),
+            ("align-walk", 8, 3, 15, "forward/back speed for alignment steps"),
+            ("align-strafe", 6, 3, 15, "side-step speed for alignment steps"),
+            ("tol-u", 0.04, 0.01, 0.2, "aligned when the box centre is this close (image width)"),
+            ("tol-h", 0.08, 0.02, 0.3, "aligned when the box size is this close (fraction)"),
+            ("tol-v", 0.05, 0.01, 0.2, "allowed vertical difference before 'view mismatch'"),
+            ("align-max-steps", 40, 5, 200, "give up after this many alignment steps")):
+        parser.add_argument(
+            f"--{flag}", type=lambda v, lo=low, hi=high, name=flag: bounded_number(
+                v, minimum=lo, maximum=hi, label=name),
+            default=default, metavar="VALUE", help=f"{help_text} (default: {default})")
     parser.add_argument(
         "--replay-settle", type=lambda v: bounded_number(v, minimum=0, maximum=5,
                                                          label="replay-settle"),
@@ -162,6 +179,7 @@ class Message(NamedTuple):
     replay: int
     raw: dict
     manual: bool  # the operator is touching a stick, LB/RB arm mode or the kneel combo
+    align: bool = False  # A held: align with the latest recording's reference
 
 
 def counter(message, key):
@@ -193,7 +211,8 @@ def parse_message(line):
     if message.get("enable") is True and arm is None:
         walk = sticks
     manual = any(sticks.values()) or arm is not None or kneel != 0
-    return Message(walk, arm, bark, kneel, record, replay, message, manual)
+    return Message(walk, arm, bark, kneel, record, replay, message, manual,
+                   message.get("align") is True)
 
 
 def parse_command(line):
@@ -404,6 +423,37 @@ class Posture:
                 self.listener("kneel", round(self.level, 4))
 
 
+class LegStepper:
+    """Alignment's legs: one primitive at a small fixed speed until stop() (sign = direction)."""
+
+    AXIS = {"turn": "yaw", "forward": "x", "strafe": "y"}
+
+    def __init__(self, driver, speeds):
+        self.driver = driver
+        self.speeds = speeds
+
+    def step(self, primitive, amount):
+        steps = dict.fromkeys(AXES, 0)
+        steps[self.AXIS[primitive]] = int(round(math.copysign(self.speeds[primitive], amount)))
+        self.driver.apply(steps)
+
+    def stop(self):
+        self.driver.stop()
+
+
+class PosePreparer:
+    """Put the kneel level and arm where a recording's reference photo was taken."""
+
+    def __init__(self, arm, posture):
+        self.arm = arm
+        self.posture = posture
+
+    def prepare(self, kneel, arm):
+        self.posture.set_level(kneel or 0.0)
+        if arm:
+            self.arm.set_pose(*arm)
+
+
 def robot_state(driver, arm, posture):
     """Snapshot of what has been commanded, for recordings."""
     return {"arm": list(arm.sent["arm"]) if arm.sent["arm"] else None,
@@ -452,7 +502,7 @@ def latest(lines, line):
 
 
 def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ramp=None,
-        posture=None, teach=None):
+        posture=None, teach=None, aligner=None):
     """Apply commands until the stream ends; always leaves the robot stopped."""
     try:
         while True:
@@ -473,6 +523,8 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                         posture.update(0)
                     if teach is not None:
                         teach.watchdog()
+                    if aligner is not None:
+                        aligner.watchdog()
                     continue
             line = latest(lines, line)
             if line is EOF:
@@ -491,11 +543,21 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                     arm.idle()
                 if posture is not None:
                     posture.update(0)
+                if aligner is not None:
+                    aligner.watchdog()
                 continue
-            if ramp is not None:
-                walk = ramp.apply(walk)
-            driver.apply(scale(walk, driver.args))
-            replaying = teach is not None and teach.update(message, message.manual)
+            aligning = False
+            if aligner is not None:
+                busy = teach is not None and teach.busy  # A is ignored while recording/replaying
+                aligning = aligner.update(message.align and not busy, message.manual)
+            if not aligning:  # the aligner drives the legs itself
+                if ramp is not None:
+                    walk = ramp.apply(walk)
+                driver.apply(scale(walk, driver.args))
+            replaying = teach is not None and teach.update(message, message.manual,
+                                                           blocked=aligning)
+            if aligning:
+                replaying = True  # arm/kneel belong to the aligner too
             if arm is not None and not replaying:
                 if arm_command is None:
                     arm.idle()
@@ -582,9 +644,27 @@ def main(argv=None):
             Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log,
             settle=args.settle)
         viewer = start_viewer(cam, args.video_port, log) if args.video_port else None
+        import align as align_module
+
+        teach_dir = Path(args.teach_dir).expanduser()
+        speeds = {"turn": args.align_turn, "forward": args.align_walk, "strafe": args.align_strafe}
+        aligner = align_module.Aligner(
+            legs=LegStepper(driver, speeds), pose=PosePreparer(arm, posture),
+            observer=align_module.Observer(
+                cam, lambda frame: teach_module.box_features(detect_boxes(frame), args.color,
+                                                             frame.shape),
+                teach_module.laplacian_sharpness, time.monotonic,
+                min_sharpness=args.min_sharpness),
+            reference=lambda: teach_module.load_reference(teach_dir),
+            calibration_path=teach_dir / "calibration.json", log=log, clock=time.monotonic,
+            motion=args.align_motion, recalibrate=args.recalibrate, settle=args.settle,
+            step_seconds=args.align_step, speeds=speeds,
+            tol={"u": args.tol_u, "h": args.tol_h, "v": args.tol_v},
+            max_steps=int(args.align_max_steps))
         try:
             run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
-                ramp=Ramp(args.ramp, args.ramp_start), posture=posture, teach=controller)
+                ramp=Ramp(args.ramp, args.ramp_start), posture=posture, teach=controller,
+                aligner=aligner)
         finally:
             if viewer is not None:
                 viewer.close()
