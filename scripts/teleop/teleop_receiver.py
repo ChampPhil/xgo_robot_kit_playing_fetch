@@ -122,6 +122,16 @@ def build_parser():
                                                        label="min-free-mb"),
         default=200, metavar="MB", help="stop recording below this much free disk (default: 200)")
     parser.add_argument(
+        "--settle", type=lambda v: bounded_number(v, minimum=0.2, maximum=3, label="settle"),
+        default=0.7, metavar="SECONDS",
+        help="time the robot must stand still before the reference photo (default: 0.7)")
+    parser.add_argument(
+        "--min-sharpness", type=lambda v: bounded_number(v, minimum=0, maximum=1000,
+                                                         label="min-sharpness"),
+        default=50, metavar="VALUE",
+        help="reject blurrier reference photos (Laplacian variance; a still frame on the "
+             "robot measured ~410; default: 50)")
+    parser.add_argument(
         "--replay-settle", type=lambda v: bounded_number(v, minimum=0, maximum=5,
                                                          label="replay-settle"),
         default=1.0, metavar="SECONDS",
@@ -564,11 +574,13 @@ def main(argv=None):
         cam.start_async()  # warm up in the background so X is ready without blocking
         recorder = teach_module.Recorder(Path(args.teach_dir).expanduser(), cam, detect_boxes,
                                          args.color, fps=args.record_fps,
-                                         min_free_mb=args.min_free_mb)
+                                         min_free_mb=args.min_free_mb,
+                                         min_sharpness=args.min_sharpness)
         arm.listener = posture.listener = recorder.on_send
         controller = teach_module.TeachController(
             cam, recorder, teach_module.Replayer(arm, posture, settle=args.replay_settle),
-            Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log)
+            Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log,
+            settle=args.settle)
         viewer = start_viewer(cam, args.video_port, log) if args.video_port else None
         try:
             run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),

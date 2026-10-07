@@ -614,7 +614,8 @@ class ReceiverTests(unittest.TestCase):
                                  latest=lambda: (frame, clock.now))
         box = {"bbox": [140, 100, 40, 40], "center": [160, 120], "area_px": 1600}
         recorder = teach.Recorder(Path(tmp.name), camera, lambda f: {"purple": [box]}, "purple",
-                                  clock=clock, free_mb=lambda p: 10 ** 6, encode=lambda f: b"j")
+                                  clock=clock, free_mb=lambda p: 10 ** 6, encode=lambda f: b"j",
+                                  sharpness=lambda f: 100.0)
         arm.listener = posture.listener = recorder.on_send
         replayer = teach.Replayer(arm, posture, clock=clock, settle=0)
         controller = teach.TeachController(
@@ -675,6 +676,7 @@ class ReceiverTests(unittest.TestCase):
         args = receiver.build_parser().parse_args([])
         self.assertEqual((args.color, args.record_fps, args.min_free_mb, args.replay_settle),
                          ("purple", 10, 200, 1.0))
+        self.assertEqual((args.settle, args.min_sharpness), (0.7, 50))
         self.assertTrue(args.teach_dir.endswith("xgo_teach"))
         with patch("sys.stderr", io.StringIO()):
             for argv in (["--color", "red"], ["--record-fps", "0"], ["--min-free-mb", "10"]):

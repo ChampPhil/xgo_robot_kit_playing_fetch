@@ -82,7 +82,9 @@ class RecorderTests(unittest.TestCase):
         self.recorder = teach.Recorder(
             self.root, self.camera, lambda frame: self.seen, "purple", fps=10, min_free_mb=200,
             clock=self.clock, free_mb=lambda path: self.free[0],
-            now=lambda: datetime(2026, 10, 5, 12, 0, 0), encode=lambda frame: b"jpeg")
+            now=lambda: datetime(2026, 10, 5, 12, 0, 0), encode=lambda frame: b"jpeg",
+            sharpness=lambda frame: self.sharp[0], min_sharpness=15)
+        self.sharp = [100.0]
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -220,6 +222,37 @@ class RecorderTests(unittest.TestCase):
             dataset_syncs = synced.count(self.recorder.dataset_file.fileno())
             self.assertTrue(2 <= dataset_syncs <= 4, dataset_syncs)
 
+    def test_reference_must_be_taken_after_the_robot_settled(self):
+        reason = self.recorder.start(STATE, not_before=self.clock.now + 0.5)
+        self.assertIn("settled", reason)
+        self.assertFalse(self.recorder.active)
+        self.clock.now += 0.6
+        self.camera.new_frame()
+        self.assertIsNone(self.recorder.start(STATE, not_before=self.clock.now - 0.1))
+
+    def test_blurry_reference_is_refused_and_sharpness_is_saved(self):
+        self.sharp[0] = 5.0
+        self.assertIn("blurry", self.recorder.start(STATE))
+        self.sharp[0] = 42.0
+        self.assertIsNone(self.recorder.start(STATE))
+        reference = json.loads((self.session() / "reference.json").read_text())
+        self.assertEqual(reference["sharpness"], 42.0)
+
+    def test_dataset_marks_moving_frames_and_sharpness(self):
+        self.recorder.start(STATE)
+        walking = dict(STATE, walk={"x": 12, "y": 0, "yaw": 0})
+        self.sharp[0] = 7.25
+        self.recorder.tick({}, walking)
+        line = json.loads((self.session() / "dataset.jsonl").read_text())
+        self.assertEqual((line["moving"], line["sharpness"]), (True, 7.2))
+
+    def test_real_sharpness_measure_prefers_sharp_images(self):
+        board = (np.indices((240, 320)).sum(axis=0) // 8 % 2 * 255).astype(np.uint8)
+        frame = cv2.cvtColor(board, cv2.COLOR_GRAY2BGR)
+        blurred = cv2.GaussianBlur(frame, (21, 21), 8)
+        self.assertGreater(teach.laplacian_sharpness(frame),
+                           10 * teach.laplacian_sharpness(blurred))
+
     def test_two_sessions_in_one_second_get_distinct_folders(self):
         self.recorder.start(STATE)
         self.recorder.stop()
@@ -325,7 +358,8 @@ class FakeRecorder:
     def __init__(self, reason=None):
         self.active, self.reason, self.ticks, self.stopped = False, reason, [], 0
 
-    def start(self, state):
+    def start(self, state, not_before=None):
+        self.attempts = getattr(self, "attempts", []) + [not_before]
         if self.reason:
             return self.reason
         self.active = True
@@ -369,8 +403,10 @@ class ControllerTests(unittest.TestCase):
         self.recorder = FakeRecorder()
         self.camera = FakeCam()
         self.log = []
+        self.state = dict(STATE)
         self.teach = teach.TeachController(self.camera, self.recorder, self.replayer, self.root,
-                                           lambda: STATE, self.log.append)
+                                           lambda: self.state, self.log.append,
+                                           clock=self.clock, settle=0.7)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -414,10 +450,55 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.arm.calls, [])
         self.assertTrue(any("Cannot replay" in line for line in self.log))
 
-    def test_record_while_camera_warms_up_says_so(self):
+    def test_record_while_camera_warms_up_retries_then_says_so(self):
         self.recorder.reason = "no camera frame"
         self.teach.update(FakeMessage(record=1), manual=False)
-        self.assertTrue(any("press X again" in line for line in self.log))
+        self.assertTrue(any("camera is starting" in line for line in self.log))
+        self.recorder.reason = None  # camera delivers a frame a moment later
+        self.clock.now += 0.3
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertTrue(self.recorder.active)
+
+    def test_record_gives_up_after_retrying(self):
+        self.recorder.reason = "no camera frame"
+        self.teach.update(FakeMessage(record=1), manual=False)
+        for _ in range(25):
+            self.clock.now += 0.1
+            self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertFalse(self.recorder.active)
+        self.assertTrue(any(line.startswith("Cannot record") and "press X again" in line
+                            for line in self.log))
+        attempts = len(self.recorder.attempts)
+        self.clock.now += 1
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertEqual(len(self.recorder.attempts), attempts)  # stopped retrying
+
+    def test_x_while_walking_waits_for_the_camera_to_settle(self):
+        self.state = dict(STATE, walk={"x": 12, "y": 0, "yaw": 0})
+        self.teach.update(FakeMessage(record=1), manual=True)
+        self.assertFalse(self.recorder.active)
+        self.assertTrue(any("settle" in line for line in self.log))
+        stopped_at = self.clock.now + 0.1
+        self.clock.now = stopped_at
+        self.state = dict(STATE)  # walking stops (last walking tick was 0.1 s earlier)
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.clock.now += 0.4
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertFalse(self.recorder.active)  # still swaying
+        self.clock.now += 0.3
+        self.teach.update(FakeMessage(record=1), manual=False)
+        self.assertTrue(self.recorder.active)
+        self.assertAlmostEqual(self.recorder.attempts[-1], stopped_at - 0.1 + 0.7)
+
+    def test_x_again_cancels_a_waiting_recording(self):
+        self.state = dict(STATE, walk={"x": 12, "y": 0, "yaw": 0})
+        self.teach.update(FakeMessage(record=1), manual=True)
+        self.teach.update(FakeMessage(record=2), manual=True)
+        self.state = dict(STATE)
+        self.clock.now += 2
+        self.teach.update(FakeMessage(record=2), manual=False)
+        self.assertFalse(self.recorder.active)
+        self.assertTrue(any("cancelled" in line for line in self.log))
 
     def test_replay_refused_during_manual_input_without_moving(self):
         self.save_motion()

@@ -58,6 +58,13 @@ and press **X** again. Each recording is a folder in `~/xgo_teach/<date-time>/` 
 | `motion_events.jsonl` | The same events, written as they happen (survives a power cut) |
 | `frames/*.jpg`, `dataset.jsonl` | Video frames (10 fps) with the gamepad command, robot state and box detection at each frame — training data |
 
+The camera shakes heavily while walking, so pressing **X** waits until the legs have been still
+for `--settle` seconds (0.7) and then takes the reference from a frame captured after that; it
+also rejects a blurry reference (`--min-sharpness`, Laplacian variance, default 50 — a still
+frame on the robot measured about 410) and keeps retrying for 2 s. Press **X** again while it
+waits to cancel. Every dataset line records `"moving"` (legs walking) and `"sharpness"`, so
+shaky frames can be filtered out for training.
+
 Recording refuses to start unless exactly one box of `--color` (default purple) is fully in view,
 and stops by itself when free disk drops below `--min-free-mb` (200). At 640×480 a minute of
 recording takes roughly 15–20 MB.

@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "box_detection"))
 
 STALE_SECONDS = 1.0
+START_TIMEOUT = 2.0  # how long X keeps retrying for a usable reference frame
 EDGE_PX = 2  # a box this close to the image border may be cut off
 MOTION_KINDS = ("arm", "claw", "kneel")
 
@@ -34,6 +35,14 @@ def box_features(detections, color, frame_shape):
     cx, cy = candidates[0]["center"]
     return {"u": round(cx / width, 4), "v": round(cy / height, 4), "w": round(w / width, 4),
             "h": round(h / height, 4), "bbox": [x, y, w, h], "frame_size": [width, height]}, None
+
+
+def laplacian_sharpness(frame):
+    """Variance of the Laplacian: high for crisp edges, low for motion blur."""
+    import cv2  # type: ignore[import-not-found]
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 def disk_free_mb(path):
@@ -69,7 +78,8 @@ def write_json_atomic(path, data):
 
 class Recorder:
     def __init__(self, root, camera, detect, color, fps=10, min_free_mb=200,
-                 clock=time.monotonic, free_mb=None, now=datetime.now, encode=None):
+                 clock=time.monotonic, free_mb=None, now=datetime.now, encode=None,
+                 sharpness=None, min_sharpness=50):
         self.root = Path(root)
         self.camera = camera
         self.detect = detect
@@ -80,6 +90,8 @@ class Recorder:
         self.free_mb = free_mb or disk_free_mb
         self.now = now
         self.encode = encode or encode_jpeg
+        self.sharpness = sharpness or laplacian_sharpness
+        self.min_sharpness = min_sharpness
         self.session = None
 
     @property
@@ -101,8 +113,12 @@ class Recorder:
             return None, None, "camera frame is stale"
         return frame, stamp, None
 
-    def start(self, state):
-        """Begin recording; returns None, or the reason recording could not start."""
+    def start(self, state, not_before=None):
+        """Begin recording; returns None, or the reason recording could not start.
+
+        not_before: the reference frame must have been captured at or after this time
+        (the camera shakes while walking and for a moment after).
+        """
         if self.active:
             return "already recording"
         reason = self.low_disk()
@@ -111,6 +127,12 @@ class Recorder:
         frame, stamp, reason = self.fresh_frame()
         if reason:
             return reason
+        if not_before is not None and stamp < not_before:
+            return "waiting for a frame taken after the robot settled"
+        sharpness = self.sharpness(frame)
+        if sharpness < self.min_sharpness:
+            return (f"camera image is blurry (sharpness {sharpness:.0f} < {self.min_sharpness:.0f}"
+                    "; hold still)")
         features, reason = box_features(self.detect(frame), self.color, frame.shape)
         if reason:
             return reason
@@ -125,6 +147,7 @@ class Recorder:
             (session / "reference.jpg").write_bytes(self.encode(frame))
             write_json_atomic(session / "reference.json", {
                 "version": 1, "color": self.color, "features": features, "state": state,
+                "sharpness": round(sharpness, 1),
                 "created": self.now().isoformat(timespec="seconds")})
             files.append(open(session / "motion_events.jsonl", "a"))
             files.append(open(session / "dataset.jsonl", "a"))
@@ -180,9 +203,11 @@ class Recorder:
         try:
             (self.session / name).write_bytes(self.encode(frame))
             features, _ = box_features(self.detect(frame), self.color, frame.shape)
+            moving = any((state.get("walk") or {}).values())  # walking shakes the camera
             self.dataset_file.write(json.dumps({
                 "i": self.frames, "t": self.elapsed(), "frame": name, "command": command,
-                "state": state, "detection": features}) + "\n")
+                "state": state, "detection": features, "moving": moving,
+                "sharpness": round(self.sharpness(frame), 1)}) + "\n")
             self.dataset_file.flush()
             if now - self.last_sync >= 1.0:  # bound what a power cut can lose
                 os.fsync(self.dataset_file.fileno())
@@ -297,14 +322,19 @@ class Replayer:
 class TeachController:
     """Route X (record) and Y (replay) presses; start the camera on first use."""
 
-    def __init__(self, camera, recorder, replayer, root, state, log=print):
+    def __init__(self, camera, recorder, replayer, root, state, log=print,
+                 clock=time.monotonic, settle=0.7):
         self.camera = camera
         self.recorder = recorder
         self.replayer = replayer
         self.root = Path(root)
         self.state = state
         self.log = log
+        self.clock = clock
+        self.settle = settle
         self.seen = {"record": 0, "replay": 0}
+        self.last_moving = None  # last time the legs were walking (the camera shakes)
+        self.pending = None  # X pressed; waiting for a steady, usable reference frame
 
     def pressed(self, key, count):
         new = count > self.seen[key]
@@ -313,6 +343,9 @@ class TeachController:
 
     def update(self, message, manual):
         """Call once per message. Returns True while a replay owns the arm and kneel."""
+        now = self.clock()
+        if any((self.state().get("walk") or {}).values()):
+            self.last_moving = now
         if self.pressed("record", message.record):
             self.toggle_recording()
         if self.pressed("replay", message.replay):
@@ -321,6 +354,8 @@ class TeachController:
                          "release them and press Y again.")
             else:
                 self.start_replay()
+        if self.pending is not None:
+            self.try_start(now)
         if self.replayer.active:
             if manual:
                 self.replayer.abort()
@@ -343,17 +378,40 @@ class TeachController:
         if self.recorder.active:
             self.report(self.recorder.stop())
             return
+        if self.pending is not None:
+            self.pending = None
+            self.log("Recording cancelled.")
+            return
         self.camera.start_async()  # never blocks the control loop
-        reason = self.recorder.start(self.state())
+        self.pending = {"deadline": None, "reason": None}
+        now = self.clock()
+        if self.last_moving is not None and now - self.last_moving < self.settle:
+            self.log("Waiting for the camera to settle before taking the reference...")
+        self.try_start(now)
+
+    def try_start(self, now):
+        """Start once the robot has been still for `settle` seconds; retry for a short while."""
+        if self.last_moving is not None and now - self.last_moving < self.settle:
+            return  # still walking, or the body is still swaying
+        if self.pending["deadline"] is None:
+            self.pending["deadline"] = now + START_TIMEOUT
+        not_before = None if self.last_moving is None else self.last_moving + self.settle
+        reason = self.recorder.start(self.state(), not_before=not_before)
+        if reason is None:
+            self.pending = None
+            self.log(f"Recording to {self.recorder.session} (press X again to stop).")
+            return
         if reason == "no camera frame":
             reason = self.camera.error or "camera is starting; press X again in a moment"
-        if reason:
+        if now >= self.pending["deadline"]:
+            self.pending = None
             self.log(f"Cannot record: {reason}.")
-        else:
-            self.log(f"Recording to {self.recorder.session} (press X again to stop).")
+        elif reason != self.pending["reason"]:
+            self.pending["reason"] = reason
+            self.log(f"Not ready to record yet: {reason} (retrying).")
 
     def start_replay(self):
-        if self.recorder.active:
+        if self.recorder.active or self.pending is not None:
             self.log("Replay button ignored while recording.")
             return
         session = latest_session(self.root)
@@ -383,6 +441,7 @@ class TeachController:
 
     def close(self):
         """Finish any recording, then always release the camera."""
+        self.pending = None
         try:
             self.replayer.abort()
             summary = self.recorder.stop()
