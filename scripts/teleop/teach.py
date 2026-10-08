@@ -18,7 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "box_detection")
 STALE_SECONDS = 1.0
 START_TIMEOUT = 2.0  # how long X keeps retrying for a usable reference frame
 EDGE_PX = 2  # a box this close to the image border may be cut off
-MOTION_KINDS = ("arm", "claw", "kneel")
+MOTION_KINDS = ("arm", "claw", "kneel", "walk")
+START_KINDS = ("arm", "claw", "kneel")  # the pose a replay moves to first; walking starts stopped
+WALK_AXES = ("x", "y", "yaw")
 
 
 def box_features(detections, color, frame_shape):
@@ -158,7 +160,7 @@ class Recorder:
                 handle.close()
             return f"cannot write recording ({exc})"
         self.events_file, self.dataset_file = files
-        self.start_state = {key: state[key] for key in MOTION_KINDS}
+        self.start_state = {key: state[key] for key in START_KINDS}
         self.events = []
         self.frames = 0
         self.started = self.clock()
@@ -253,6 +255,12 @@ def latest_session(root):
     return finished[-1] if finished else None
 
 
+def valid_walk(steps):
+    return (isinstance(steps, dict) and set(steps) == set(WALK_AXES)
+            and all(isinstance(steps[axis], int) and not isinstance(steps[axis], bool)
+                    for axis in WALK_AXES))
+
+
 def load_motion(session):
     """Read and validate motion.json; raises ValueError (or OSError) if unusable."""
     try:
@@ -266,6 +274,8 @@ def load_motion(session):
         time_ok = isinstance(event.get("t"), (int, float)) and event["t"] >= 0
         if len(kinds) != 1 or not time_ok or set(event) != {"t", kinds[0]}:
             raise ValueError(f"bad motion event {event}")
+        if kinds[0] == "walk" and not valid_walk(event["walk"]):
+            raise ValueError(f"bad walk event {event}")
     if not isinstance(motion.get("start"), dict):
         raise ValueError("motion.json has no start state")
     return motion
@@ -286,9 +296,10 @@ def load_reference(root):
 class Replayer:
     """Play a recorded motion through the arm/kneel controllers, driven by tick()."""
 
-    def __init__(self, arm, posture, clock=time.monotonic, settle=1.0):
+    def __init__(self, arm, posture, clock=time.monotonic, settle=1.0, driver=None):
         self.arm = arm
         self.posture = posture
+        self.driver = driver  # legs: recorded walking is replayed blind
         self.clock = clock
         self.settle = settle
         self.active = False
@@ -300,6 +311,9 @@ class Replayer:
             self.arm.set_pose(*value)
         elif kind == "claw":
             self.arm.set_claw(value)
+        elif kind == "walk":
+            if self.driver is not None:
+                self.driver.apply(dict(value))
         else:
             self.posture.set_level(value)
 
@@ -324,11 +338,18 @@ class Replayer:
             self.index += 1
         if self.index >= len(self.events):
             self.active = False
+            self.stop_legs()
             return "done"
         return None
 
     def abort(self):
+        if self.active:
+            self.stop_legs()
         self.active = False
+
+    def stop_legs(self):
+        if self.driver is not None:
+            self.driver.stop()
 
 
 class TeachController:

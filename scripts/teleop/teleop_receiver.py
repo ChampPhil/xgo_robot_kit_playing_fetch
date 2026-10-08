@@ -180,6 +180,7 @@ class Message(NamedTuple):
     raw: dict
     manual: bool  # the operator is touching a stick, LB/RB arm mode or the kneel combo
     align: bool = False  # A held: align with the latest recording's reference
+    reset: int = 0  # BACK presses: open the claw and move the arm to its start pose
 
 
 def counter(message, key):
@@ -212,7 +213,7 @@ def parse_message(line):
         walk = sticks
     manual = any(sticks.values()) or arm is not None or kneel != 0
     return Message(walk, arm, bark, kneel, record, replay, message, manual,
-                   message.get("align") is True)
+                   message.get("align") is True, counter(message, "reset"))
 
 
 def parse_command(line):
@@ -233,6 +234,7 @@ class Driver:
         self.dog = dog
         self.args = args
         self.current = dict.fromkeys(AXES, 0)
+        self.listener = None  # called as listener("walk", steps) when the legs' command changes
 
     def apply(self, steps):
         if steps == self.current:
@@ -245,10 +247,18 @@ class Driver:
             if steps[axis] != self.current[axis]:
                 senders[axis](steps[axis])
         self.current = dict(steps)
+        self.notify()
 
     def stop(self):
+        was_moving = any(self.current.values())
         self.dog.stop()
         self.current = dict.fromkeys(AXES, 0)
+        if was_moving:
+            self.notify()
+
+    def notify(self):
+        if self.listener:
+            self.listener("walk", dict(self.current))
 
 
 class Ramp:
@@ -441,6 +451,28 @@ class LegStepper:
         self.driver.stop()
 
 
+class ResetButton:
+    """BACK: open the claw, then move the arm back to its start pose."""
+
+    def __init__(self, arm, args, log):
+        self.arm = arm
+        self.args = args
+        self.log = log
+        self.seen = 0
+
+    def update(self, count, allowed):
+        pressed = count > self.seen
+        self.seen = count
+        if not pressed:
+            return
+        if not allowed:
+            self.log("Reset ignored during replay or alignment.")
+            return
+        self.arm.set_claw(0)
+        self.arm.set_pose(self.args.arm_home_x, self.args.arm_home_z)
+        self.log("Claw opened; arm back to its start pose.")
+
+
 class PosePreparer:
     """Put the kneel level and arm where a recording's reference photo was taken."""
 
@@ -502,7 +534,7 @@ def latest(lines, line):
 
 
 def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ramp=None,
-        posture=None, teach=None, aligner=None):
+        posture=None, teach=None, aligner=None, resetter=None):
     """Apply commands until the stream ends; always leaves the robot stopped."""
     try:
         while True:
@@ -550,14 +582,18 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
             if aligner is not None:
                 busy = teach is not None and teach.busy  # A is ignored while recording/replaying
                 aligning = aligner.update(message.align and not busy, message.manual)
-            if not aligning:  # the aligner drives the legs itself
+            replaying = teach is not None and teach.update(message, message.manual,
+                                                           blocked=aligning)
+            if not aligning and not replaying:  # aligner and replay drive the legs themselves
                 if ramp is not None:
                     walk = ramp.apply(walk)
                 driver.apply(scale(walk, driver.args))
-            replaying = teach is not None and teach.update(message, message.manual,
-                                                           blocked=aligning)
+            elif ramp is not None:
+                ramp.reset()
             if aligning:
                 replaying = True  # arm/kneel belong to the aligner too
+            if resetter is not None:
+                resetter.update(message.reset, allowed=not replaying)
             if arm is not None and not replaying:
                 if arm_command is None:
                     arm.idle()
@@ -638,9 +674,10 @@ def main(argv=None):
                                          args.color, fps=args.record_fps,
                                          min_free_mb=args.min_free_mb,
                                          min_sharpness=args.min_sharpness)
-        arm.listener = posture.listener = recorder.on_send
+        arm.listener = posture.listener = driver.listener = recorder.on_send
         controller = teach_module.TeachController(
-            cam, recorder, teach_module.Replayer(arm, posture, settle=args.replay_settle),
+            cam, recorder, teach_module.Replayer(arm, posture, settle=args.replay_settle,
+                                                 driver=driver),
             Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log,
             settle=args.settle)
         viewer = start_viewer(cam, args.video_port, log) if args.video_port else None
@@ -664,7 +701,7 @@ def main(argv=None):
         try:
             run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
                 ramp=Ramp(args.ramp, args.ramp_start), posture=posture, teach=controller,
-                aligner=aligner)
+                aligner=aligner, resetter=ResetButton(arm, args, log))
         finally:
             if viewer is not None:
                 viewer.close()

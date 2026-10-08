@@ -137,6 +137,18 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(json.loads(lines[0]), {"t": 0.0, "arm": [90, 30]})
         self.assertFalse((self.session() / "motion.json").exists())
 
+    def test_walking_is_recorded_as_motion(self):
+        self.recorder.start(STATE)
+        self.clock.now += 0.4
+        self.recorder.on_send("walk", {"x": 12, "y": 0, "yaw": 0})
+        self.clock.now += 1.0
+        self.recorder.on_send("walk", {"x": 0, "y": 0, "yaw": 0})
+        self.recorder.stop()
+        motion = json.loads((self.session() / "motion.json").read_text())
+        self.assertEqual(motion["events"][:2], [{"t": 0.4, "walk": {"x": 12, "y": 0, "yaw": 0}},
+                                                {"t": 1.4, "walk": {"x": 0, "y": 0, "yaw": 0}}])
+        self.assertNotIn("walk", motion["start"])
+
     def test_events_ignored_when_not_recording(self):
         self.recorder.on_send("arm", [90, 30])
         self.assertFalse(self.root.exists())
@@ -262,6 +274,17 @@ class RecorderTests(unittest.TestCase):
                          ["20261005-120000", "20261005-120000-2"])
 
 
+class FakeDriver:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def apply(self, steps):
+        self.calls.append(("walk", dict(steps)))
+
+    def stop(self):
+        self.calls.append(("stop",))
+
+
 class FakeArm:
     def __init__(self):
         self.calls = []
@@ -281,6 +304,12 @@ class FakePosture:
         self.calls.append(("kneel", level))
 
 
+WALK_MOTION = {"version": 1, "color": "purple", "duration": 2.0,
+               "start": {"arm": [80, 30], "claw": 0, "kneel": 0.0},
+               "events": [{"t": 0.2, "walk": {"x": 12, "y": 0, "yaw": 0}},
+                          {"t": 1.0, "walk": {"x": 0, "y": 0, "yaw": 0}},
+                          {"t": 1.5, "claw": 200}]}
+
 MOTION = {"version": 1, "color": "purple", "duration": 2.0,
           "start": {"arm": [80, 30], "claw": 0, "kneel": 0.0},
           "events": [{"t": 0.5, "arm": [90, 20]}, {"t": 1.0, "claw": 200},
@@ -294,7 +323,8 @@ class ReplayTests(unittest.TestCase):
         self.clock = FakeClock()
         self.arm = FakeArm()
         self.posture = FakePosture(self.arm.calls)
-        self.replayer = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=1.0)
+        self.replayer = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=1.0,
+                                       driver=FakeDriver(self.arm.calls))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -337,8 +367,36 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(self.arm.calls[-1], ("arm", 90, 20))
         self.clock.now += 1.0
         self.assertEqual(self.replayer.tick(), "done")
-        self.assertEqual(self.arm.calls[-2:], [("claw", 200), ("kneel", 0.5)])
+        self.assertEqual(self.arm.calls[-3:], [("claw", 200), ("kneel", 0.5), ("stop",)])
         self.assertFalse(self.replayer.active)
+
+    def test_replay_walks_then_grabs_and_always_ends_stopped(self):
+        self.replayer.start(WALK_MOTION)
+        self.arm.calls.clear()
+        self.clock.now += 1.25
+        self.replayer.tick()
+        self.assertEqual(self.arm.calls, [("walk", {"x": 12, "y": 0, "yaw": 0})])
+        self.clock.now += 1.5
+        self.assertEqual(self.replayer.tick(), "done")
+        self.assertEqual(self.arm.calls[-3:], [("walk", {"x": 0, "y": 0, "yaw": 0}),
+                                               ("claw", 200), ("stop",)])
+
+    def test_abort_mid_walk_stops_the_legs(self):
+        self.replayer.start(WALK_MOTION)
+        self.clock.now += 1.25
+        self.replayer.tick()
+        self.replayer.abort()
+        self.assertEqual(self.arm.calls[-1], ("stop",))
+
+    def test_load_accepts_walk_events_and_rejects_bad_ones(self):
+        self.save("walk", WALK_MOTION)
+        self.assertEqual(teach.load_motion(self.root / "walk")["events"][0]["walk"]["x"], 12)
+        for bad in ({"x": "fast", "y": 0, "yaw": 0}, {"x": 1}, [1, 2, 3], {"x": True, "y": 0, "yaw": 0}):
+            self.save("badwalk", dict(WALK_MOTION, events=[{"t": 0.1, "walk": bad}]))
+            with self.assertRaises(ValueError):
+                teach.load_motion(self.root / "badwalk")
+            (self.root / "badwalk" / "motion.json").unlink()
+            (self.root / "badwalk").rmdir()
 
     def test_replay_skips_unknown_start_pose_and_abort_stops(self):
         self.replayer.start(dict(MOTION, start={"arm": None, "claw": None, "kneel": 0.0}))
@@ -346,7 +404,7 @@ class ReplayTests(unittest.TestCase):
         self.replayer.abort()
         self.clock.now += 10
         self.assertIsNone(self.replayer.tick())
-        self.assertEqual(len(self.arm.calls), 1)
+        self.assertEqual(self.arm.calls, [("kneel", 0.0), ("stop",)])  # legs stopped on abort
 
 
 class ReferenceTests(unittest.TestCase):

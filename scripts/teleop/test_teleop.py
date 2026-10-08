@@ -127,7 +127,7 @@ class SenderTests(unittest.TestCase):
                                  CONTROLLER_BUTTON_START=6, CONTROLLER_AXIS_TRIGGERLEFT=4,
                                  CONTROLLER_BUTTON_DPAD_UP=11, CONTROLLER_BUTTON_DPAD_DOWN=12,
                                  CONTROLLER_BUTTON_X=2, CONTROLLER_BUTTON_Y=3,
-                                 CONTROLLER_BUTTON_A=0)
+                                 CONTROLLER_BUTTON_A=0, CONTROLLER_BUTTON_BACK=4)
         reads = {"n": 0}
         real_read = sender.read_sticks
 
@@ -147,11 +147,12 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True,
                                               "arm": False, "ax": 0.0, "az": 0.0, "claw": 0.0,
                                               "bark": 0, "kneel": 0, "record": 0, "replay": 0,
-                                              "align": False})
+                                              "align": False, "reset": 0})
 
     def state(self, **overrides):
         state = dict(left_x=0.0, left_y=0.0, right_x=0.0, lb=False, rb=False, b=False, start=False,
-                     lt=False, dpad_up=False, dpad_down=False, x=False, y=False, a=False)
+                     lt=False, dpad_up=False, dpad_down=False, x=False, y=False, a=False,
+                     back=False)
         state.update(overrides)
         return state
 
@@ -161,7 +162,8 @@ class SenderTests(unittest.TestCase):
                                       arming, 0.1, barks=2)
         self.assertEqual(message, {"x": 1.0, "y": -1.0, "yaw": -1.0, "enable": False,
                                    "arm": True, "ax": 1.0, "az": 1.0, "claw": 1.0, "bark": 2,
-                                   "kneel": 0, "record": 0, "replay": 0, "align": False})
+                                   "kneel": 0, "record": 0, "replay": 0, "align": False,
+                                   "reset": 0})
         message = sender.make_message(self.state(left_x=-1, left_y=1, right_x=-1, rb=True),
                                       arming, 0.1, barks=2)
         self.assertEqual((message["ax"], message["az"], message["claw"]), (-1.0, -1.0, -1.0))
@@ -183,6 +185,11 @@ class SenderTests(unittest.TestCase):
         plain = sender.remote_command(sender.build_parser().parse_args([]))
         self.assertNotIn("--align-motion", plain)
         self.assertNotIn("--recalibrate", plain)
+
+    def test_back_press_counter_is_sent_as_reset(self):
+        message = sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0,
+                                      resets=2)
+        self.assertEqual(message["reset"], 2)
 
     def test_x_and_y_press_counters_are_sent(self):
         message = sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0,
@@ -603,6 +610,49 @@ class ReceiverTests(unittest.TestCase):
                      posture=posture, teach=teach_stub)
         self.assertEqual(events, ["stand"])
         self.assertTrue(any("No space left" in entry for entry in self.log))
+
+    def test_driver_reports_walk_changes_to_its_listener(self):
+        heard = []
+        self.driver.listener = lambda kind, value: heard.append((kind, value))
+        self.driver.apply({"x": 12, "y": 0, "yaw": 0})
+        self.driver.apply({"x": 12, "y": 0, "yaw": 0})  # unchanged
+        self.driver.apply({"x": 0, "y": 0, "yaw": 0})
+        self.driver.stop()  # already stopped: nothing new to report
+        self.assertEqual(heard, [("walk", {"x": 12, "y": 0, "yaw": 0}),
+                                 ("walk", {"x": 0, "y": 0, "yaw": 0})])
+
+    def test_idle_messages_do_not_cancel_a_replayed_walk(self):
+        replaying = {"on": True}
+
+        def update(message, manual, blocked=False):
+            if replaying["on"]:
+                self.driver.apply({"x": 12, "y": 0, "yaw": 0})  # the replay walks
+            return replaying["on"]
+
+        teach_stub = SimpleNamespace(busy=True, update=update, watchdog=lambda: None,
+                                     close=lambda: None)
+        receiver.run(self.driver, Paced(line(enable=False), line(enable=False), receiver.EOF), 0.5,
+                     self.log.append, teach=teach_stub)
+        self.assertEqual(self.dog.calls, [("x", 12), ("stop",)])  # stop only at the end
+
+    def test_back_resets_the_claw_and_arm_unless_busy(self):
+        clock = FakeClock()
+        arm = receiver.ArmController(self.dog, self.args, clock=clock)
+        resetter = receiver.ResetButton(arm, self.args, self.log.append)
+        resetter.update(0, allowed=True)
+        self.assertEqual(self.dog.calls, [])
+        resetter.update(1, allowed=True)
+        self.assertEqual(self.dog.calls, [("claw", 0), ("arm", 80, 30)])
+        resetter.update(2, allowed=False)
+        self.assertEqual(len(self.dog.calls), 2)
+        self.assertTrue(any("ignored" in entry for entry in self.log))
+
+    def test_run_routes_back_presses(self):
+        presses = []
+        resetter = SimpleNamespace(update=lambda count, allowed: presses.append((count, allowed)))
+        receiver.run(self.driver, Paced(line(reset=1), receiver.EOF), 0.5, self.log.append,
+                     resetter=resetter)
+        self.assertEqual(presses, [(1, True)])
 
     def test_align_flag_parses(self):
         self.assertIs(receiver.parse_message(line(align=True)).align, True)

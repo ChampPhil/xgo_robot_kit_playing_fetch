@@ -20,7 +20,7 @@ moves the robot in small steps until the view matches, after which replay picks 
 
 | Topic | Decision |
 | --- | --- |
-| Replayed motion | Arm, claw and kneel only. Walking is never replayed. |
+| Replayed motion | Walk, arm, claw and kneel. *Changed 2026-10-08:* the box is only fully visible from a stand-off distance, so a recording starts there and includes walking forward; replayed walking is blind and aborts on any input. |
 | Video/dataset | Recorded with everything commanded (walking included) plus robot state. |
 | Buttons | **X** toggles recording, **Y** replays the latest pickup, **hold A** aligns. B still barks. |
 | Storage | On the robot only, with a free-disk guard. |

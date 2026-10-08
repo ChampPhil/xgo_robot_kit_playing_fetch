@@ -23,6 +23,7 @@ the robot turns them into `move_x` / `move_y` / `turn` calls.
 | **X** | Start / stop recording a pickup (needs one fully visible box of `--color`) |
 | **Y** | Replay the latest recorded pickup; any stick, LB/RB or kneel press aborts |
 | **A (hold)** | Align with the latest recording's reference view (moves only with `--align-motion`) |
+| **BACK** | Reset the claw: open it, then move the arm back to its start pose (80, 30) |
 | START, or Ctrl+C | Stop and quit |
 
 Arm mode is **speed** control: hold a stick and the arm keeps moving, centre it
@@ -49,13 +50,23 @@ neutral value); if the first kneel press makes the body jump, adjust
 
 ## Recording and replaying a pickup
 
-Put the box directly in front of the robot, press **X**, pick it up with the controller,
-and press **X** again. Each recording is a folder in `~/xgo_teach/<date-time>/` on the robot:
+The box is only fully visible from a little way back, out of the claw's reach, so a recording
+starts at that **stand-off** position and includes the approach:
+
+1. Centre the box in the video from where it is fully visible (later, holding **A** does this).
+2. Press **X** (the reference photo is taken here, once the legs have settled).
+3. Walk forward with LB, stop, then pick the box up with RB (and LT + D-pad to kneel).
+4. Press **X** again.
+
+**Y** replays all of it: the recorded walking (blind, at the recorded speeds and times), then
+the arm/claw/kneel moves. Any stick, LB/RB or kneel input aborts the replay and stops the legs,
+as does losing the connection; the legs are always stopped at the end. Each recording is a
+folder in `~/xgo_teach/<date-time>/` on the robot:
 
 | File | Contents |
 | --- | --- |
 | `reference.jpg`, `reference.json` | The camera view and box position/size when recording started |
-| `motion.json` | Arm, claw and kneel targets with timings — what **Y** replays (walking is never replayed) |
+| `motion.json` | Walk, arm, claw and kneel commands with timings — what **Y** replays |
 | `motion_events.jsonl` | The same events, written as they happen (survives a power cut) |
 | `frames/*.jpg`, `dataset.jsonl` | Video frames (10 fps) with the gamepad command, robot state and box detection at each frame — training data |
 
