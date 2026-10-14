@@ -654,6 +654,24 @@ class ReceiverTests(unittest.TestCase):
                      resetter=resetter)
         self.assertEqual(presses, [(1, True)])
 
+    def test_heading_flags(self):
+        args = receiver.build_parser().parse_args([])
+        self.assertEqual((args.no_heading_hold, args.heading_gain, args.heading_max,
+                          args.heading_sign), (False, 2.0, 25, None))
+        args = receiver.build_parser().parse_args(["--heading-sign", "-1", "--no-heading-hold"])
+        self.assertEqual((args.heading_sign, args.no_heading_hold), (-1, True))
+        with patch("sys.stderr", io.StringIO()):
+            for argv in (["--heading-sign", "2"], ["--heading-max", "100"]):
+                with self.assertRaises(SystemExit):
+                    receiver.build_parser().parse_args(argv)
+
+    def test_run_refreshes_the_heading_correction_every_tick(self):
+        refreshes = []
+        self.driver.refresh = lambda: refreshes.append(1)
+        receiver.run(self.driver, Paced(line(enable=False), line(enable=False), receiver.EOF),
+                     0.5, self.log.append)
+        self.assertEqual(len(refreshes), 2)
+
     def test_align_flag_parses(self):
         self.assertIs(receiver.parse_message(line(align=True)).align, True)
         self.assertIs(receiver.parse_message(line()).align, False)

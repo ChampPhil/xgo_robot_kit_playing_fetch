@@ -33,8 +33,9 @@ RECEIVER_FLAGS = ("max-x", "max-y", "max-turn", "ramp", "ramp-start", "arm-speed
                   "arm-home-x", "arm-home-z", "claw-start", "kneel-pitch", "kneel-height",
                   "stand-height", "kneel-time", "color", "settle", "min-sharpness", "record-fps",
                   "min-free-mb", "replay-settle", "align-step", "align-turn", "align-walk",
-                  "align-strafe", "tol-u", "tol-h", "tol-v", "align-max-steps")
-RECEIVER_SWITCHES = ("align-motion", "recalibrate")
+                  "align-strafe", "tol-u", "tol-h", "tol-v", "align-max-steps",
+                  "heading-gain", "heading-max", "heading-sign")
+RECEIVER_SWITCHES = ("align-motion", "recalibrate", "no-heading-hold")
 
 
 def bounded_number(value, *, minimum, maximum, label):

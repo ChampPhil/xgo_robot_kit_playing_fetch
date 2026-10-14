@@ -131,6 +131,18 @@ def build_parser():
         default=50, metavar="VALUE",
         help="reject blurrier reference photos (Laplacian variance; a still frame on the "
              "robot measured ~410; default: 50)")
+    parser.add_argument("--no-heading-hold", action="store_true",
+                        help="don't correct walking drift with the gyro")
+    parser.add_argument(
+        "--heading-gain", type=lambda v: bounded_number(v, minimum=0.5, maximum=10,
+                                                        label="heading-gain"),
+        default=2.0, metavar="VALUE", help="turn speed per degree of drift (default: 2)")
+    parser.add_argument(
+        "--heading-max", type=lambda v: bounded_number(v, minimum=5, maximum=60,
+                                                       label="heading-max"),
+        default=25, metavar="DEG_PER_S", help="largest drift correction (default: 25)")
+    parser.add_argument("--heading-sign", type=int, choices=(-1, 1), default=None,
+                        help="gyro direction (default: learned from the first turn and saved)")
     parser.add_argument("--align-motion", action="store_true",
                         help="let holding A move the robot (otherwise A only reports alignment)")
     parser.add_argument("--recalibrate", action="store_true",
@@ -603,6 +615,8 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                 barker.update(bark)
             if posture is not None and not replaying:
                 posture.update(kneel)
+            if hasattr(driver, "refresh"):
+                driver.refresh()  # keep correcting walking drift, including replayed walks
     finally:
         driver.stop()
         try:
@@ -674,6 +688,14 @@ def main(argv=None):
                                          args.color, fps=args.record_fps,
                                          min_free_mb=args.min_free_mb,
                                          min_sharpness=args.min_sharpness)
+        import heading
+
+        hold = heading.HeadingHold(
+            heading.make_yaw_reader(dog.ser), time.monotonic, log=log, sign=args.heading_sign,
+            sign_path=Path(args.teach_dir).expanduser() / "heading.json",
+            enabled=not args.no_heading_hold, gain=args.heading_gain,
+            max_turn=args.heading_max)
+        driver = heading.HeadingDriver(driver, hold)
         arm.listener = posture.listener = driver.listener = recorder.on_send
         controller = teach_module.TeachController(
             cam, recorder, teach_module.Replayer(arm, posture, settle=args.replay_settle,

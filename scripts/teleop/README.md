@@ -70,6 +70,23 @@ another window releases everything (the robot stops). Keys give fixed speeds (ha
 
 Arm keys take over from walk keys (walking stops while the arm moves), like RB on the gamepad.
 
+## Walking straight (heading hold)
+
+The gait drifts, so "walk straight" alone curves. While the legs walk without a turn command,
+the receiver locks the heading and reads the IMU's fused yaw (register `0x64`) every 0.2 s,
+adding a small corrective turn (`--heading-gain` 2 deg/s per degree, at most `--heading-max`
+25 deg/s, ignoring drift under 2 deg). Any turn you command wins; the heading re-locks when you
+stop turning or stop walking. It also corrects replayed walks (recordings store what you asked
+for, not the corrections, so nothing is applied twice).
+
+- **First use:** it does nothing until it has seen one real turn (Q/E, the turn stick, or the
+  alignment calibration's 360° turn), from which it learns which way the gyro counts. That is
+  saved to `~/xgo_teach/heading.json`; `--heading-sign 1|-1` overrides it.
+- **Safety:** yaw is read with the logger's validated protocol (50 ms timeout); a failed read
+  means *no* correction (xgolib's `read_yaw()` would wait 1 s and return 0, which looks like a
+  sudden turn). If drift still reaches 30° while correcting, heading hold switches itself off for
+  the session and says so. `--no-heading-hold` turns it off.
+
 ## Recording and replaying a pickup
 
 The box is only fully visible from a little way back, out of the claw's reach, so a recording
