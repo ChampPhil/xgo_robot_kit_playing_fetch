@@ -1,0 +1,116 @@
+"""Keyboard control for gamepad_sender.py --keyboard: hold keys in a small window.
+
+Keys are turned into the same controller state the gamepad produces, so the robot
+side is unchanged. Holding a key moves; releasing it stops. Fixed speeds (half, or
+full with Shift) make recordings cleaner and more repeatable than analog sticks.
+"""
+
+HALF, FULL = 0.5, 1.0
+SHIFT_KEYS = ("left shift", "right shift")
+CTRL_KEYS = {"left ctrl", "right ctrl", "left meta", "right meta"}
+WALK_KEYS = {"w", "s", "a", "d", "q", "e"}
+ARM_KEYS = {"i", "k", "j", "l", "u", "o"}
+HELP = (
+    "Hold: W/S walk  A/D side-step  Q/E turn  (Shift = full speed)",
+    "      I/K arm up/down  J/L arm in/out  U/O claw open/close",
+    "      F/R kneel down/stand up   Space align",
+    "Press: X record  Y replay  C reset claw  B bark  Esc quit",
+    "Click this window first; clicking elsewhere stops the robot.",
+)
+
+
+def axis(held, negative, positive, speed):
+    return speed * ((positive in held) - (negative in held))
+
+
+def keys_to_state(held):
+    """Map the set of held key names to the controller state used by make_message."""
+    speed = FULL if any(key in held for key in SHIFT_KEYS) else HALF
+    arm_mode = bool(held & ARM_KEYS)
+    if arm_mode:  # same layout as the gamepad's RB mode: left stick = arm, right stick = claw
+        left_x = axis(held, "j", "l", speed)
+        left_y = axis(held, "i", "k", speed)  # up is negative, like a stick
+        right_x = axis(held, "u", "o", speed)
+    else:
+        left_x = axis(held, "a", "d", speed)
+        left_y = axis(held, "w", "s", speed)
+        right_x = axis(held, "q", "e", speed)
+    return {
+        "left_x": left_x, "left_y": left_y, "right_x": right_x,
+        "lb": not arm_mode and bool(held & WALK_KEYS),  # holding a walk key is the dead-man
+        "rb": arm_mode,
+        "lt": "f" in held or "r" in held,
+        "dpad_down": "f" in held, "dpad_up": "r" in held,
+        "a": "space" in held,
+        "x": "x" in held, "y": "y" in held, "back": "c" in held, "b": "b" in held,
+        "start": "escape" in held,
+    }
+
+
+class KeyTracker:
+    """Which keys are held, from ("down", name) / ("up", name) / ("focus_lost",) / ("quit",)."""
+
+    def __init__(self):
+        self.held = set()
+
+    def process(self, events):
+        for event in events:
+            if event[0] == "down":
+                if event[1] == "c" and self.held & CTRL_KEYS:
+                    self.held = {"escape"}  # Ctrl+C (or Cmd+C) in the window quits
+                    continue
+                self.held.add(event[1])
+            elif event[0] == "up":
+                self.held.discard(event[1])
+            elif event[0] == "focus_lost":
+                self.held.clear()  # keys released while unfocused would never report "up"
+            elif event[0] == "quit":
+                self.held = {"escape"}
+
+
+class KeyboardPad:
+    """A small pygame window that captures keys and shows what is being sent."""
+
+    name = "keyboard window"
+
+    def __init__(self):
+        import signal
+
+        import pygame
+
+        self.pygame = pygame
+        pygame.display.init()
+        # SDL takes over SIGINT underneath Python; restore it so Ctrl+C in the terminal
+        # still quits (and stops the robot) instead of being swallowed.
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        pygame.font.init()
+        self.screen = pygame.display.set_mode((620, 190))
+        pygame.display.set_caption("XGO keyboard control")
+        self.font = pygame.font.SysFont(None, 22)
+        self.tracker = KeyTracker()
+
+    def events(self):
+        pygame = self.pygame
+        for event in pygame.event.get():
+            if event.type == pygame.KEYDOWN:
+                yield "down", pygame.key.name(event.key)
+            elif event.type == pygame.KEYUP:
+                yield "up", pygame.key.name(event.key)
+            elif event.type == pygame.WINDOWFOCUSLOST:
+                yield ("focus_lost",)
+            elif event.type == pygame.QUIT:
+                yield ("quit",)
+
+    def read(self):
+        self.tracker.process(list(self.events()))
+        state = keys_to_state(self.tracker.held)
+        self.draw()
+        return state
+
+    def draw(self):
+        self.screen.fill((24, 24, 28))
+        lines = list(HELP) + ["Held: " + (" ".join(sorted(self.tracker.held)) or "-")]
+        for row, text in enumerate(lines):
+            colour = (120, 220, 140) if row == len(lines) - 1 else (225, 225, 225)
+            self.screen.blit(self.font.render(text, True, colour), (12, 10 + row * 28))
+        self.pygame.display.flip()

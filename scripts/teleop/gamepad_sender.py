@@ -63,6 +63,8 @@ def build_parser():
     parser.add_argument("--no-deadman", action="store_true",
                         help="drive without holding LB (sticks must be centred first)")
     parser.add_argument("--yes", action="store_true", help="skip the safety confirmation prompt")
+    parser.add_argument("--keyboard", action="store_true",
+                        help="control with the keyboard in a small window instead of a gamepad")
     parser.add_argument("--video", action="store_true",
                         help="show the robot camera live in the browser (port 8090)")
     for flag in RECEIVER_FLAGS:
@@ -221,7 +223,14 @@ def status_line(command):
         state, command["x"], command["y"], command["yaw"], command["bark"], kneel)
 
 
-def stream(pygame, pad, out, args, ssh=None):
+def effective_deadzone(args):
+    """Keys give exact speeds (0.5 or 1.0), so no stick deadzone is applied to them."""
+    return 0.0 if args.keyboard else args.deadzone
+
+
+def stream(pygame, pad, out, args, ssh=None, reader=None):
+    read = reader or (lambda: read_sticks(pygame, pad))
+    deadzone = effective_deadzone(args)
     arming = Arming(deadman=not args.no_deadman)
     period = 1.0 / args.rate
     presses = {"b": 0, "x": 0, "y": 0, "back": 0}
@@ -230,14 +239,14 @@ def stream(pygame, pad, out, args, ssh=None):
     while True:
         if ssh is not None and ssh.poll() is not None:
             raise RuntimeError(f"SSH session ended (exit {ssh.returncode})")
-        state = read_sticks(pygame, pad)
+        state = read()
         if state["start"]:
             return
         for button in presses:  # counters, so a skipped line cannot lose a press
             if state[button] and not was_down[button]:
                 presses[button] += 1
             was_down[button] = state[button]
-        command = make_message(state, arming, args.deadzone, presses["b"],
+        command = make_message(state, arming, deadzone, presses["b"],
                                records=presses["x"], replays=presses["y"],
                                resets=presses["back"])
         out.write(json.dumps(command) + "\n")
@@ -252,18 +261,34 @@ def stream(pygame, pad, out, args, ssh=None):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    try:
-        pygame, pad = open_controller()
-    except ImportError:
-        parser.exit(2, "pygame-ce is missing; run: .venv/bin/python -m pip install -r "
-                       "scripts/teleop/requirements-mac.txt\n")
-    except RuntimeError as exc:
-        parser.exit(2, f"gamepad_sender: {exc}\n")
-    print(f"Gamepad: {pad.name}", file=sys.stderr)
+    missing = ("pygame-ce is missing; run: .venv/bin/python -m pip install -r "
+               "scripts/teleop/requirements-mac.txt\n")
+    pygame = pad = None
+    if not args.keyboard:
+        try:
+            pygame, pad = open_controller()
+        except ImportError:
+            parser.exit(2, missing)
+        except RuntimeError as exc:
+            parser.exit(2, f"gamepad_sender: {exc}\n")
+        print(f"Gamepad: {pad.name}", file=sys.stderr)
+
+    def keyboard_reader():
+        """Open the key-capture window (after the terminal prompt, so it gets focus)."""
+        if not args.keyboard:
+            return None
+        try:
+            import keyboard_input
+            window = keyboard_input.KeyboardPad()
+        except ImportError:
+            parser.exit(2, missing)
+        print("Keyboard: click the 'XGO keyboard control' window, then hold keys "
+              "(Esc quits; clicking elsewhere stops the robot).", file=sys.stderr)
+        return window.read
 
     if args.print_only:
         try:
-            stream(pygame, pad, sys.stdout, args)
+            stream(pygame, pad, sys.stdout, args, reader=keyboard_reader())
         except (KeyboardInterrupt, BrokenPipeError):
             pass
         return 0
@@ -274,17 +299,19 @@ def main(argv=None):
                   "Press Enter to connect (Ctrl+C to cancel)... ")
         except EOFError:
             parser.error("confirmation requires a terminal; use --yes only when it is safe")
+    reader = keyboard_reader()  # before SSH, so a window failure leaves nothing running
     ssh = start_ssh(args)
     if args.video:
         url = video_url(args)
         print(f"Live video: {url} (opens once the robot is ready)", file=sys.stderr)
         threading.Timer(4.0, webbrowser.open, args=(url,)).start()
-    print(("Hold LB to walk" if not args.no_deadman else "Centre the sticks, then walk")
-          + "; hold RB to move the arm/claw; LT + D-pad down/up kneels/stands; B barks; "
-          "X records, Y replays, BACK resets the claw; "
-          "START or Ctrl+C quits.", file=sys.stderr)
+    if not args.keyboard:
+        print(("Hold LB to walk" if not args.no_deadman else "Centre the sticks, then walk")
+              + "; hold RB to move the arm/claw; LT + D-pad down/up kneels/stands; B barks; "
+              "X records, Y replays, BACK resets the claw; "
+              "START or Ctrl+C quits.", file=sys.stderr)
     try:
-        stream(pygame, pad, ssh.stdin, args, ssh)
+        stream(pygame, pad, ssh.stdin, args, ssh, reader=reader)
     except KeyboardInterrupt:
         pass
     except (BrokenPipeError, RuntimeError) as exc:

@@ -48,6 +48,28 @@ robot to standing. Body height while standing is assumed to be 85 mm (xgolib's
 neutral value); if the first kneel press makes the body jump, adjust
 `--stand-height`.
 
+## Keyboard control (`--keyboard`)
+
+Add `--keyboard` to drive from the laptop keyboard instead of the gamepad (the gamepad still
+works without the flag). After you confirm in the terminal, a small **"XGO keyboard control"**
+window opens; click it, then **hold** keys — releasing a key stops that motion, and clicking
+another window releases everything (the robot stops). Keys give fixed speeds (half, or full with
+**Shift**), which makes recordings cleaner and more repeatable than analog sticks.
+
+| Hold | Action | Press | Action |
+| --- | --- | --- | --- |
+| **W / S** | Walk forward / back | **X** | Start / stop recording |
+| **A / D** | Side-step left / right | **Y** | Replay the latest recording |
+| **Q / E** | Turn left / right | **C** | Reset the claw (open, arm to start) |
+| **I / K** | Arm up / down | **B** | Bark |
+| **J / L** | Arm in / out | **Esc**, Ctrl+C | Quit (the robot stops and stands) |
+| **U / O** | Claw open / close | | |
+| **F / R** | Kneel down / stand up | | |
+| **Shift** | Full speed (with the keys above) | | |
+| **Space** | Align (same as holding A) | | |
+
+Arm keys take over from walk keys (walking stops while the arm moves), like RB on the gamepad.
+
 ## Recording and replaying a pickup
 
 The box is only fully visible from a little way back, out of the claw's reach, so a recording
