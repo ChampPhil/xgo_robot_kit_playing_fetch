@@ -79,6 +79,11 @@ adding a small corrective turn (`--heading-gain` 2 deg/s per degree, at most `--
 stop turning or stop walking. It also corrects replayed walks (recordings store what you asked
 for, not the corrections, so nothing is applied twice).
 
+- **Gyro drift:** the IMU's yaw drifts steadily even standing still (measured **6.9 deg/s** on
+  this robot, never wrapped to ±180). Whenever the legs have been still for 0.5 s, heading hold
+  fits the drift rate over the last few seconds and subtracts it, so only real rotation is
+  corrected. After starting, **stand still for about 2.5 s** before walking; until then it says
+  "stand still for 2 s" and doesn't correct.
 - **First use:** it does nothing until it has seen one real turn (Q/E, the turn stick, or the
   alignment calibration's 360° turn), from which it learns which way the gyro counts. That is
   saved to `~/xgo_teach/heading.json`; `--heading-sign 1|-1` overrides it.

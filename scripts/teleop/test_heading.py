@@ -24,27 +24,35 @@ class Clock:
 
 
 class Gyro:
-    """read() returns `yaw`; set `fail` to raise like a missed UART reply."""
+    """read() returns the true heading `yaw` plus a constant drift of `bias` deg/s (the real
+    IMU drifted 6.9 deg/s standing still); set `fail` to raise like a missed UART reply."""
 
-    def __init__(self, yaw=0.0):
-        self.yaw, self.fail, self.reads = yaw, False, 0
+    def __init__(self, yaw=0.0, clock=None, bias=0.0):
+        self.yaw, self.fail, self.reads, self.clock, self.bias = yaw, False, 0, clock, bias
 
     def read(self):
         self.reads += 1
         if self.fail:
             raise TimeoutError("no valid reply from register 0x64")
-        return self.yaw
+        drift = self.bias * (self.clock.now - 100.0) if self.clock else 0.0
+        return self.yaw + drift
 
 
 class HeadingHoldTests(unittest.TestCase):
-    def make(self, sign=None, **kwargs):
-        self.clock, self.gyro, self.log = Clock(), Gyro(), []
+    def make(self, sign=None, bias=0.0, gyro_bias=0.0, **kwargs):
+        self.clock, self.log = Clock(), []
+        self.gyro = Gyro(clock=self.clock, bias=gyro_bias)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.hold = heading.HeadingHold(self.gyro.read, self.clock, log=self.log.append,
                                         sign=sign, sign_path=Path(self.tmp.name) / "heading.json",
-                                        **kwargs)
+                                        bias=bias, **kwargs)
         return self.hold
+
+    def stand_still(self, seconds):
+        for _ in range(int(seconds / 0.05)):
+            self.clock.now += 0.05
+            self.hold.idle()
 
     def tick(self, steps, seconds=0.2):
         self.clock.now += seconds
@@ -140,6 +148,52 @@ class HeadingHoldTests(unittest.TestCase):
         self.assertFalse(self.hold.enabled)
         self.assertTrue(any("disabled" in line for line in self.log))
 
+    def test_no_correction_until_the_drift_has_been_measured(self):
+        self.make(sign=1, bias=None, gyro_bias=6.9)
+        self.tick(STRAIGHT)
+        self.gyro.yaw = 10.0
+        self.assertEqual(self.tick(STRAIGHT)["yaw"], 0)
+        self.assertTrue(any("stand still" in line for line in self.log))
+
+    def test_measures_the_drift_while_standing_still(self):
+        self.make(sign=1, bias=None, gyro_bias=6.9)
+        self.stand_still(1.0)
+        self.assertIsNone(self.hold.bias)  # not enough steady data yet (0.5 s settle + 2 s)
+        self.stand_still(2.5)
+        self.assertAlmostEqual(self.hold.bias, 6.9, places=2)
+        self.assertTrue(any("6.9" in line for line in self.log))
+
+    def test_steady_drift_is_not_mistaken_for_turning(self):
+        self.make(sign=1, bias=None, gyro_bias=6.9)
+        self.stand_still(3.0)
+        corrections = [self.tick(STRAIGHT)["yaw"] for _ in range(15)]  # 3 s walking straight
+        self.assertEqual(corrections, [0] * 15)
+
+    def test_real_turning_on_top_of_drift_is_corrected(self):
+        self.make(sign=1, bias=None, gyro_bias=6.9)
+        self.stand_still(3.0)
+        self.tick(STRAIGHT)
+        self.gyro.yaw = 5.0  # really turned 5 deg left, on top of the drift
+        self.assertEqual(self.tick(STRAIGHT)["yaw"], -10)
+
+    def test_direction_learning_subtracts_the_drift(self):
+        # a slow right turn (-5 deg/s) plus +6.9 deg/s drift reads as turning *left*
+        self.make(bias=None, gyro_bias=6.9)
+        self.stand_still(3.0)
+        right = {"x": 0, "y": 0, "yaw": -25}
+        for _ in range(8):
+            self.clock.now += 0.2
+            self.gyro.yaw -= 1.0  # -5 deg/s true rotation
+            self.hold.adjust(right)
+        self.assertEqual(self.hold.sign, 1)  # counter-clockwise positive, not fooled
+
+    def test_moving_restarts_the_still_period(self):
+        self.make(sign=1, bias=None, gyro_bias=6.9)
+        self.stand_still(1.5)
+        self.tick(STRAIGHT)  # walked: the earlier still samples no longer count
+        self.stand_still(1.5)
+        self.assertIsNone(self.hold.bias)
+
     def test_disabled_hold_passes_commands_through(self):
         self.make(sign=1, enabled=False)
         self.tick(STRAIGHT)
@@ -205,7 +259,8 @@ class InnerDriver:
 class HeadingDriverTests(unittest.TestCase):
     def setUp(self):
         self.clock, self.gyro = Clock(), Gyro()
-        self.hold = heading.HeadingHold(self.gyro.read, self.clock, log=lambda text: None, sign=1)
+        self.hold = heading.HeadingHold(self.gyro.read, self.clock, log=lambda text: None, sign=1,
+                                        bias=0.0)
         self.inner = InnerDriver()
         self.driver = heading.HeadingDriver(self.inner, self.hold)
         self.heard = []
