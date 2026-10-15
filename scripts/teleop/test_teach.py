@@ -63,6 +63,17 @@ class FeatureTests(unittest.TestCase):
         self.assertAlmostEqual(features["h"], 41 / 240, places=2)
         self.assertEqual(features["frame_size"], [320, 240])
 
+    def test_a_clearly_dominant_box_wins_over_small_specks(self):
+        speck = {"bbox": [224, 52, 6, 10], "center": [227, 57], "area_px": 50}
+        shape = (240, 320, 3)
+        features, reason = teach.box_features(detections(BOX, speck), "purple", shape, dominant=2.0)
+        self.assertIsNone(reason)
+        self.assertEqual(features["bbox"], BOX["bbox"])
+        twin = dict(BOX, area_px=1000)  # not clearly smaller: still ambiguous
+        self.assertIn("ambiguous", teach.box_features(detections(BOX, twin), "purple", shape,
+                                                      dominant=2.0)[1])
+        self.assertIn("ambiguous", teach.box_features(detections(BOX, speck), "purple", shape)[1])
+
     def test_missing_ambiguous_and_clipped_boxes_are_rejected(self):
         shape = (240, 320, 3)
         self.assertIn("no purple", teach.box_features(detections(), "purple", shape)[1])

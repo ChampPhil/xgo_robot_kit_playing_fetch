@@ -101,6 +101,16 @@ class BoxDetectionTests(unittest.TestCase):
             self.assertEqual(report["status"], "ambiguous")
             self.assertIsNone(report["target"])
 
+    def test_custom_ranges_and_min_area(self):
+        hsv = np.zeros((240, 320, 3), dtype=np.uint8)
+        cv2.rectangle(hsv, (100, 100), (110, 110), (165, 50, 40), -1)  # dark, desaturated, far
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        self.assertEqual(detect_boxes.detect_boxes(frame)["purple"], [])
+        wide = {"purple": ((115, 40, 25), (178, 255, 255))}
+        found = detect_boxes.detect_boxes(frame, min_area=40, ranges=wide)
+        self.assertEqual(len(found["purple"]), 1)
+        self.assertEqual(set(found), {"purple"})
+
     def test_duplicate_order_is_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
             detect_boxes.main(["--order", "purple", "purple", "orange", "--source", "missing.png"])

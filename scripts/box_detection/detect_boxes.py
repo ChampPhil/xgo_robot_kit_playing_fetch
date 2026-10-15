@@ -51,11 +51,15 @@ def build_parser():
     return parser
 
 
-def detect_boxes(frame, min_area=150):
-    """Return all plausible colored rectangles; do not silently choose between duplicates."""
+def detect_boxes(frame, min_area=150, ranges=None):
+    """Return all plausible colored rectangles; do not silently choose between duplicates.
+
+    ranges: {color: (lower_hsv, upper_hsv)} to use instead of HSV_RANGES (e.g. a wider purple
+    for far, dark boxes).
+    """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     found = {}
-    for color, (lower, upper) in HSV_RANGES.items():
+    for color, (lower, upper) in (ranges or HSV_RANGES).items():
         mask = cv2.inRange(hsv, np.array(lower, dtype=np.uint8), np.array(upper, dtype=np.uint8))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, KERNEL)

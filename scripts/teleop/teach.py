@@ -23,12 +23,17 @@ START_KINDS = ("arm", "claw", "kneel")  # the pose a replay moves to first; walk
 WALK_AXES = ("x", "y", "yaw")
 
 
-def box_features(detections, color, frame_shape):
-    """(features, None) for exactly one unclipped box of `color`, else (None, reason)."""
-    candidates = detections.get(color, [])
+def box_features(detections, color, frame_shape, dominant=None):
+    """(features, None) for exactly one unclipped box of `color`, else (None, reason).
+
+    dominant: if set, several candidates are accepted when the largest has at least this many
+    times the area of the next (a box among small specks of similar colour).
+    """
+    candidates = sorted(detections.get(color, []), key=lambda c: c["area_px"], reverse=True)
     if not candidates:
         return None, f"no {color} box in view"
-    if len(candidates) > 1:
+    if len(candidates) > 1 and not (
+            dominant and candidates[0]["area_px"] >= dominant * candidates[1]["area_px"]):
         return None, f"{len(candidates)} {color} boxes in view (ambiguous)"
     height, width = frame_shape[:2]
     x, y, w, h = candidates[0]["bbox"]
