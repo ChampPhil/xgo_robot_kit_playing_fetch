@@ -50,8 +50,9 @@ class KeyMappingTests(unittest.TestCase):
         self.assertEqual(message("f")["kneel"], 1)
         self.assertEqual(message("r")["kneel"], -1)
         self.assertTrue(message("space")["align"])
-        state = kb.keys_to_state({"x", "y", "c", "b", "escape"})
-        self.assertTrue(all(state[k] for k in ("x", "y", "back", "b", "start")))
+        state = kb.keys_to_state({"x", "y", "c", "b", "escape", "z"})
+        self.assertTrue(all(state[k] for k in ("x", "y", "back", "b", "start", "rt")))
+        self.assertFalse(kb.keys_to_state(set())["rt"])
 
 
 class KeyTrackerTests(unittest.TestCase):

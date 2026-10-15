@@ -194,6 +194,17 @@ class HeadingHoldTests(unittest.TestCase):
         self.stand_still(1.5)
         self.assertIsNone(self.hold.bias)
 
+    def test_forgetting_the_drift_requires_a_new_measurement(self):
+        self.make(sign=1, bias=None, gyro_bias=6.9)
+        self.stand_still(3.0)
+        self.assertIsNotNone(self.hold.bias)
+        self.hold.forget_drift()
+        self.assertIsNone(self.hold.bias)
+        self.assertEqual(self.tick(STRAIGHT)["yaw"], 0)
+        self.assertEqual(sum("stand still" in line for line in self.log), 1)
+        self.stand_still(3.0)
+        self.assertIsNotNone(self.hold.bias)
+
     def test_disabled_hold_passes_commands_through(self):
         self.make(sign=1, enabled=False)
         self.tick(STRAIGHT)

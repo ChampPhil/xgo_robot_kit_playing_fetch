@@ -14,7 +14,7 @@ HELP = (
     "Hold: W/S walk  A/D side-step  Q/E turn  (Shift = full speed)",
     "      I/K arm up/down  J/L arm in/out  U/O claw open/close",
     "      F/R kneel down/stand up   Space align",
-    "Press: X record  Y replay  C reset claw  B bark  Esc quit",
+    "Press: X record  Y replay  C reset claw  Z full reset+kneel  B bark  Esc quit",
     "Click this window first; clicking elsewhere stops the robot.",
 )
 
@@ -43,6 +43,7 @@ def keys_to_state(held):
         "dpad_down": "f" in held, "dpad_up": "r" in held,
         "a": "space" in held,
         "x": "x" in held, "y": "y" in held, "back": "c" in held, "b": "b" in held,
+        "rt": "z" in held,  # full reset, then kneel
         "start": "escape" in held,
     }
 

@@ -150,6 +150,14 @@ class HeadingHold:
                 self.log(f"Heading hold: gyro drift measured at {self.bias:.1f} deg/s "
                          "(subtracted while walking).")
 
+    def forget_drift(self):
+        """After a full robot reset the gyro may be recalibrated: measure the drift again."""
+        self.bias = None
+        self.told_to_stand = False
+        self.still_since = None
+        self.still_samples.clear()
+        self.reset()
+
     def moving(self):
         self.still_since = None
         self.still_samples.clear()
@@ -236,6 +244,9 @@ class HeadingDriver:
     @property
     def args(self):
         return self.inner.args
+
+    def forget_drift(self):
+        self.hold.forget_drift()
 
     def apply(self, steps):
         steps = dict(steps)

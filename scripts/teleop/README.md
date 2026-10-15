@@ -24,6 +24,7 @@ the robot turns them into `move_x` / `move_y` / `turn` calls.
 | **Y** | Replay the latest recorded pickup; any stick, LB/RB or kneel press aborts |
 | **A (hold)** | Align with the latest recording's reference view (moves only with `--align-motion`) |
 | **BACK** | Reset the claw: open it, then move the arm back to its start pose (80, 30) |
+| **RT** | Full reset: stop, run the robot's own reset (`dog.reset()`), then kneel fully |
 | START, or Ctrl+C | Stop and quit |
 
 Arm mode is **speed** control: hold a stick and the arm keeps moving, centre it
@@ -63,12 +64,22 @@ another window releases everything (the robot stops). Keys give fixed speeds (ha
 | **Q / E** | Turn left / right | **C** | Reset the claw (open, arm to start) |
 | **I / K** | Arm up / down | **B** | Bark |
 | **J / L** | Arm in / out | **Esc**, Ctrl+C | Quit (the robot stops and stands) |
-| **U / O** | Claw open / close | | |
+| **U / O** | Claw open / close | **Z** | Full reset, then kneel fully |
 | **F / R** | Kneel down / stand up | | |
 | **Shift** | Full speed (with the keys above) | | |
 | **Space** | Align (same as holding A) | | |
 
 Arm keys take over from walk keys (walking stops while the arm moves), like RB on the gamepad.
+
+## Start position and full reset
+
+After connecting, the robot now goes straight to **fully kneeled** (front down 10°, body at
+70 mm), so a box in front stays in the camera's view; `--start-standing` keeps it standing.
+**RT** (gamepad) or **Z** (keyboard) does a **full reset** at any time: legs stop, the robot's
+built-in reset returns posture, arm and gait parameters to neutral (about 0.75 s), the program
+forgets the arm/claw/kneel state it had sent, heading hold re-measures the gyro drift (the
+reset may recalibrate the gyro), and the robot kneels fully again. It is ignored while
+recording, replaying or aligning. Stand still about 3 s afterwards before walking.
 
 ## Walking straight (heading hold)
 

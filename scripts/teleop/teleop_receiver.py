@@ -131,6 +131,8 @@ def build_parser():
         default=50, metavar="VALUE",
         help="reject blurrier reference photos (Laplacian variance; a still frame on the "
              "robot measured ~410; default: 50)")
+    parser.add_argument("--start-standing", action="store_true",
+                        help="stay standing after connecting (default: kneel fully)")
     parser.add_argument("--no-heading-hold", action="store_true",
                         help="don't correct walking drift with the gyro")
     parser.add_argument(
@@ -193,6 +195,7 @@ class Message(NamedTuple):
     manual: bool  # the operator is touching a stick, LB/RB arm mode or the kneel combo
     align: bool = False  # A held: align with the latest recording's reference
     reset: int = 0  # BACK presses: open the claw and move the arm to its start pose
+    full_reset: int = 0  # RT / Z presses: full robot reset, then kneel
 
 
 def counter(message, key):
@@ -225,7 +228,8 @@ def parse_message(line):
         walk = sticks
     manual = any(sticks.values()) or arm is not None or kneel != 0
     return Message(walk, arm, bark, kneel, record, replay, message, manual,
-                   message.get("align") is True, counter(message, "reset"))
+                   message.get("align") is True, counter(message, "reset"),
+                   counter(message, "full_reset"))
 
 
 def parse_command(line):
@@ -341,6 +345,11 @@ class ArmController:
                               ARM_LIMITS["claw"])
         self.send()
 
+    def forget(self):
+        """After a full robot reset the arm's pose and claw are unknown again."""
+        self.pose = self.grip = self.last = None
+        self.sent = {"arm": None, "claw": None}
+
     def set_pose(self, x, z):
         """Jump the arm target (used by replay); manual control continues from here."""
         self.pose = [float(x), float(z)]
@@ -422,6 +431,10 @@ class Posture:
         self.level = clamp(self.level + direction * dt / self.args.kneel_time, (0.0, 1.0))
         self.send()
 
+    def forget(self):
+        """After a full robot reset the body is back at neutral (standing)."""
+        self.level, self.last, self.sent = 0.0, None, None
+
     def set_level(self, level):
         """Jump to a kneel level (used by replay)."""
         self.level = clamp(float(level), (0.0, 1.0))
@@ -485,6 +498,38 @@ class ResetButton:
         self.log("Claw opened; arm back to its start pose.")
 
 
+class FullReset:
+    """RT / Z: stop, run the robot's own full reset, resync our state, then kneel fully."""
+
+    def __init__(self, dog, driver, arm, posture, ramp, log):
+        self.dog = dog
+        self.driver = driver
+        self.arm = arm
+        self.posture = posture
+        self.ramp = ramp
+        self.log = log
+        self.seen = 0
+
+    def update(self, count, allowed):
+        pressed = count > self.seen
+        self.seen = count
+        if not pressed:
+            return
+        if not allowed:
+            self.log("Full reset ignored during recording, replay or alignment.")
+            return
+        self.driver.stop()
+        self.dog.reset()  # xgolib: action 255, then 0.75 s for the robot to settle
+        self.arm.forget()
+        self.posture.forget()
+        self.ramp.reset()
+        if hasattr(self.driver, "forget_drift"):
+            self.driver.forget_drift()  # the reset may recalibrate the gyro
+        self.posture.set_level(1.0)
+        self.log("Full reset done; kneeling. Stand still ~3 s so heading hold can re-measure "
+                 "the gyro drift.")
+
+
 class PosePreparer:
     """Put the kneel level and arm where a recording's reference photo was taken."""
 
@@ -546,7 +591,7 @@ def latest(lines, line):
 
 
 def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ramp=None,
-        posture=None, teach=None, aligner=None, resetter=None):
+        posture=None, teach=None, aligner=None, resetter=None, fullreset=None):
     """Apply commands until the stream ends; always leaves the robot stopped."""
     try:
         while True:
@@ -606,6 +651,9 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                 replaying = True  # arm/kneel belong to the aligner too
             if resetter is not None:
                 resetter.update(message.reset, allowed=not replaying)
+            if fullreset is not None:
+                busy = replaying or (teach is not None and teach.busy)
+                fullreset.update(message.full_reset, allowed=not busy)
             if arm is not None and not replaying:
                 if arm_command is None:
                     arm.idle()
@@ -682,6 +730,10 @@ def main(argv=None):
         from detect_boxes import detect_boxes
 
         arm, posture = ArmController(dog, args), Posture(dog, args)
+        ramp = Ramp(args.ramp, args.ramp_start)
+        if not args.start_standing:
+            posture.set_level(1.0)  # start fully kneeled: the box stays in camera view
+            log("Kneeling (start position; --start-standing to stay up).")
         cam = camera_module.Camera(0)
         cam.start_async()  # warm up in the background so X is ready without blocking
         recorder = teach_module.Recorder(Path(args.teach_dir).expanduser(), cam, detect_boxes,
@@ -722,8 +774,9 @@ def main(argv=None):
             max_steps=int(args.align_max_steps))
         try:
             run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
-                ramp=Ramp(args.ramp, args.ramp_start), posture=posture, teach=controller,
-                aligner=aligner, resetter=ResetButton(arm, args, log))
+                ramp=ramp, posture=posture, teach=controller,
+                aligner=aligner, resetter=ResetButton(arm, args, log),
+                fullreset=FullReset(dog, driver, arm, posture, ramp, log))
         finally:
             if viewer is not None:
                 viewer.close()

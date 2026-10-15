@@ -6,7 +6,8 @@ Hold RB for arm mode (walking stops): left stick up/down raises/lowers the arm,
 right/left reaches out/in; right stick right/left closes/opens the claw.
 Hold LT and press D-pad down/up to kneel the front down / stand back up.
 B barks. X starts/stops recording a pickup, Y replays it, hold A to align with it
-(moves only with --align-motion). BACK opens the claw and resets the arm.
+(moves only with --align-motion). BACK opens the claw and resets the arm; RT does a full
+robot reset and kneels.
 START or Ctrl+C quits. Commands go to teleop_receiver.py on the robot through
 the stdin of an SSH session, so the existing Tailscale SSH access is the link.
 """
@@ -35,7 +36,7 @@ RECEIVER_FLAGS = ("max-x", "max-y", "max-turn", "ramp", "ramp-start", "arm-speed
                   "min-free-mb", "replay-settle", "align-step", "align-turn", "align-walk",
                   "align-strafe", "tol-u", "tol-h", "tol-v", "align-max-steps",
                   "heading-gain", "heading-max", "heading-sign")
-RECEIVER_SWITCHES = ("align-motion", "recalibrate", "no-heading-hold")
+RECEIVER_SWITCHES = ("align-motion", "recalibrate", "no-heading-hold", "start-standing")
 
 
 def bounded_number(value, *, minimum, maximum, label):
@@ -100,7 +101,8 @@ def make_command(left_x, left_y, right_x, enable, deadzone):
     return command
 
 
-def make_message(state, arming, deadzone, barks, records=0, replays=0, resets=0):
+def make_message(state, arming, deadzone, barks, records=0, replays=0, resets=0,
+                 full_resets=0):
     """Full command line: walking (LB), arm mode (RB, which overrides walking) and barks."""
     command = make_command(state["left_x"], state["left_y"], state["right_x"], False, deadzone)
     command["enable"] = arming.enable(command, state["lb"]) and not state["rb"]
@@ -115,6 +117,7 @@ def make_message(state, arming, deadzone, barks, records=0, replays=0, resets=0)
     command["replay"] = replays  # Y presses: replay the latest recording
     command["align"] = state["a"]  # A held: align with the latest recording
     command["reset"] = resets  # BACK presses: open the claw, arm to its start pose
+    command["full_reset"] = full_resets  # RT / Z presses: full robot reset, then kneel
     # LT + D-pad: kneel. Independent of LB/RB, so the arm still works while knelt.
     command["kneel"] = (int(state["dpad_down"]) - int(state["dpad_up"])) if state["lt"] else 0
     return command
@@ -167,6 +170,8 @@ def read_sticks(pygame, pad):
         "b": button(pygame.CONTROLLER_BUTTON_B),
         "a": button(pygame.CONTROLLER_BUTTON_A),
         "back": button(pygame.CONTROLLER_BUTTON_BACK),
+        # The F310's triggers are digital in D mode; SDL reports them as 0 or full-scale.
+        "rt": pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERRIGHT) > AXIS_MAX // 2,
         "x": button(pygame.CONTROLLER_BUTTON_X),
         "y": button(pygame.CONTROLLER_BUTTON_Y),
         "start": button(pygame.CONTROLLER_BUTTON_START),
@@ -234,7 +239,7 @@ def stream(pygame, pad, out, args, ssh=None, reader=None):
     deadzone = effective_deadzone(args)
     arming = Arming(deadman=not args.no_deadman)
     period = 1.0 / args.rate
-    presses = {"b": 0, "x": 0, "y": 0, "back": 0}
+    presses = {"b": 0, "x": 0, "y": 0, "back": 0, "rt": 0}
     was_down = dict.fromkeys(presses, False)
     next_tick = time.monotonic()
     while True:
@@ -249,7 +254,7 @@ def stream(pygame, pad, out, args, ssh=None, reader=None):
             was_down[button] = state[button]
         command = make_message(state, arming, deadzone, presses["b"],
                                records=presses["x"], replays=presses["y"],
-                               resets=presses["back"])
+                               resets=presses["back"], full_resets=presses["rt"])
         out.write(json.dumps(command) + "\n")
         out.flush()
         if ssh is not None:

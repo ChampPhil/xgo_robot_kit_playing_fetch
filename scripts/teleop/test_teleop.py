@@ -41,6 +41,9 @@ class FakeDog:
     def arm(self, x, z):
         self.calls.append(("arm", x, z))
 
+    def reset(self):
+        self.calls.append(("reset",))
+
     def claw(self, value):
         self.calls.append(("claw", value))
 
@@ -127,7 +130,8 @@ class SenderTests(unittest.TestCase):
                                  CONTROLLER_BUTTON_START=6, CONTROLLER_AXIS_TRIGGERLEFT=4,
                                  CONTROLLER_BUTTON_DPAD_UP=11, CONTROLLER_BUTTON_DPAD_DOWN=12,
                                  CONTROLLER_BUTTON_X=2, CONTROLLER_BUTTON_Y=3,
-                                 CONTROLLER_BUTTON_A=0, CONTROLLER_BUTTON_BACK=4)
+                                 CONTROLLER_BUTTON_A=0, CONTROLLER_BUTTON_BACK=4,
+                                 CONTROLLER_AXIS_TRIGGERRIGHT=5)
         reads = {"n": 0}
         real_read = sender.read_sticks
 
@@ -147,12 +151,12 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True,
                                               "arm": False, "ax": 0.0, "az": 0.0, "claw": 0.0,
                                               "bark": 0, "kneel": 0, "record": 0, "replay": 0,
-                                              "align": False, "reset": 0})
+                                              "align": False, "reset": 0, "full_reset": 0})
 
     def state(self, **overrides):
         state = dict(left_x=0.0, left_y=0.0, right_x=0.0, lb=False, rb=False, b=False, start=False,
                      lt=False, dpad_up=False, dpad_down=False, x=False, y=False, a=False,
-                     back=False)
+                     back=False, rt=False)
         state.update(overrides)
         return state
 
@@ -163,7 +167,7 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(message, {"x": 1.0, "y": -1.0, "yaw": -1.0, "enable": False,
                                    "arm": True, "ax": 1.0, "az": 1.0, "claw": 1.0, "bark": 2,
                                    "kneel": 0, "record": 0, "replay": 0, "align": False,
-                                   "reset": 0})
+                                   "reset": 0, "full_reset": 0})
         message = sender.make_message(self.state(left_x=-1, left_y=1, right_x=-1, rb=True),
                                       arming, 0.1, barks=2)
         self.assertEqual((message["ax"], message["az"], message["claw"]), (-1.0, -1.0, -1.0))
@@ -185,6 +189,11 @@ class SenderTests(unittest.TestCase):
         plain = sender.remote_command(sender.build_parser().parse_args([]))
         self.assertNotIn("--align-motion", plain)
         self.assertNotIn("--recalibrate", plain)
+
+    def test_rt_press_counter_is_sent_as_full_reset(self):
+        message = sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0,
+                                      full_resets=3)
+        self.assertEqual(message["full_reset"], 3)
 
     def test_back_press_counter_is_sent_as_reset(self):
         message = sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0,
@@ -653,6 +662,48 @@ class ReceiverTests(unittest.TestCase):
         receiver.run(self.driver, Paced(line(reset=1), receiver.EOF), 0.5, self.log.append,
                      resetter=resetter)
         self.assertEqual(presses, [(1, True)])
+
+    def test_full_reset_resets_resyncs_and_kneels(self):
+        clock = FakeClock()
+        arm = receiver.ArmController(self.dog, self.args, clock=clock)
+        posture = receiver.Posture(self.dog, self.args, clock=clock)
+        ramp = receiver.Ramp(2.0, 0.4, clock=clock)
+        arm.set_pose(120, 40)
+        arm.set_claw(200)
+        posture.set_level(0.3)
+        self.driver.apply({"x": 12, "y": 0, "yaw": 0})
+        forgot = []
+        self.driver.forget_drift = lambda: forgot.append(1)
+        full = receiver.FullReset(self.dog, self.driver, arm, posture, ramp, self.log.append)
+        self.dog.calls.clear()
+        full.update(0, allowed=True)
+        self.assertEqual(self.dog.calls, [])
+        full.update(1, allowed=True)
+        self.assertEqual(self.dog.calls, [("stop",), ("reset",), ("attitude", "p", 10),
+                                          ("translation", "z", 70)])
+        self.assertEqual(forgot, [1])
+        self.assertEqual((arm.pose, arm.grip, arm.sent), (None, None, {"arm": None, "claw": None}))
+        self.assertEqual(posture.level, 1.0)
+        arm.set_claw(0)  # the next claw command is sent even if it equals the old one
+        self.assertEqual(self.dog.calls[-1], ("claw", 0))
+        self.assertTrue(any("Full reset" in entry for entry in self.log))
+
+    def test_full_reset_ignored_while_busy(self):
+        full = receiver.FullReset(self.dog, self.driver, None, None, None, self.log.append)
+        full.update(1, allowed=False)
+        self.assertEqual(self.dog.calls, [])
+        self.assertTrue(any("ignored" in entry for entry in self.log))
+
+    def test_run_routes_full_reset_presses(self):
+        presses = []
+        fullreset = SimpleNamespace(update=lambda count, allowed: presses.append((count, allowed)))
+        receiver.run(self.driver, Paced(line(full_reset=2), receiver.EOF), 0.5, self.log.append,
+                     fullreset=fullreset)
+        self.assertEqual(presses, [(2, True)])
+
+    def test_start_standing_flag(self):
+        self.assertFalse(receiver.build_parser().parse_args([]).start_standing)
+        self.assertTrue(receiver.build_parser().parse_args(["--start-standing"]).start_standing)
 
     def test_heading_flags(self):
         args = receiver.build_parser().parse_args([])
