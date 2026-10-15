@@ -521,13 +521,19 @@ class FullReset:
         self.driver.stop()
         self.dog.reset()  # xgolib: action 255, then 0.75 s for the robot to settle
         self.arm.forget()
+        self.arm.set_claw(0)  # reset the claw to fully open
         self.posture.forget()
         self.ramp.reset()
         if hasattr(self.driver, "forget_drift"):
             self.driver.forget_drift()  # the reset may recalibrate the gyro
         self.posture.set_level(1.0)
-        self.log("Full reset done; kneeling. Stand still ~3 s so heading hold can re-measure "
-                 "the gyro drift.")
+        self.log("Full reset done; claw open, kneeling. Stand still ~3 s so heading hold can "
+                 "re-measure the gyro drift.")
+
+
+def alignment_legs_driver(driver):
+    """Alignment steers by the camera; keep heading-hold corrections out of its steps."""
+    return getattr(driver, "inner", driver)
 
 
 class PosePreparer:
@@ -760,7 +766,8 @@ def main(argv=None):
         teach_dir = Path(args.teach_dir).expanduser()
         speeds = {"turn": args.align_turn, "forward": args.align_walk, "strafe": args.align_strafe}
         aligner = align_module.Aligner(
-            legs=LegStepper(driver, speeds), pose=PosePreparer(arm, posture),
+            legs=LegStepper(alignment_legs_driver(driver), speeds),
+            pose=PosePreparer(arm, posture),
             observer=align_module.Observer(
                 cam, lambda frame: teach_module.box_features(detect_boxes(frame), args.color,
                                                              frame.shape),

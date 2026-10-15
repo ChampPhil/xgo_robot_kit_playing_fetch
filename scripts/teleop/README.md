@@ -24,7 +24,7 @@ the robot turns them into `move_x` / `move_y` / `turn` calls.
 | **Y** | Replay the latest recorded pickup; any stick, LB/RB or kneel press aborts |
 | **A (hold)** | Align with the latest recording's reference view (moves only with `--align-motion`) |
 | **BACK** | Reset the claw: open it, then move the arm back to its start pose (80, 30) |
-| **RT** | Full reset: stop, run the robot's own reset (`dog.reset()`), then kneel fully |
+| **RT** | Full reset: stop, run the robot's own reset (`dog.reset()`), open the claw fully, then kneel fully |
 | START, or Ctrl+C | Stop and quit |
 
 Arm mode is **speed** control: hold a stick and the arm keeps moving, centre it
@@ -64,7 +64,7 @@ another window releases everything (the robot stops). Keys give fixed speeds (ha
 | **Q / E** | Turn left / right | **C** | Reset the claw (open, arm to start) |
 | **I / K** | Arm up / down | **B** | Bark |
 | **J / L** | Arm in / out | **Esc**, Ctrl+C | Quit (the robot stops and stands) |
-| **U / O** | Claw open / close | **Z** | Full reset, then kneel fully |
+| **U / O** | Claw open / close | **Z** | Full reset: claw fully open, kneel fully |
 | **F / R** | Kneel down / stand up | | |
 | **Shift** | Full speed (with the keys above) | | |
 | **Space** | Align (same as holding A) | | |
@@ -77,8 +77,8 @@ After connecting, the robot now goes straight to **fully kneeled** (front down 1
 70 mm), so a box in front stays in the camera's view; `--start-standing` keeps it standing.
 **RT** (gamepad) or **Z** (keyboard) does a **full reset** at any time: legs stop, the robot's
 built-in reset returns posture, arm and gait parameters to neutral (about 0.75 s), the program
-forgets the arm/claw/kneel state it had sent, heading hold re-measures the gyro drift (the
-reset may recalibrate the gyro), and the robot kneels fully again. It is ignored while
+forgets the arm/claw/kneel state it had sent, the claw opens fully, heading hold re-measures
+the gyro drift (the reset may recalibrate the gyro), and the robot kneels fully again. It is ignored while
 recording, replaying or aligning. Stand still about 3 s afterwards before walking.
 
 ## Walking straight (heading hold)
@@ -145,6 +145,7 @@ Design: `docs/superpowers/specs/2026-10-07-self-calibrating-alignment-design.md`
 - **Display-only by default.** Without `--align-motion`, holding A moves nothing; it logs the
   error (`eu` = sideways, `eh` = size, `ev` = height in the image) and the step it *would* take.
   Use this first to check the directions on the real robot.
+- **Alignment steers by the camera only** (heading hold is bypassed for its steps).
 - **Calibration (first A hold with `--align-motion`, or `--recalibrate`).** The robot puts the arm
   and kneel where the reference was taken, then turns a **full 360° in small stop-and-look steps**
   (the box leaves the view and comes back), then one step forward/back and left/right. That

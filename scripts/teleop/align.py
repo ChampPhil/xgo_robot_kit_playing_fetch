@@ -168,8 +168,8 @@ class Aligner:
     """
 
     MIN_STEP_SECONDS = 0.12
-    TURN_STEP_LIMIT = 90
-    CALIBRATION_SECONDS = 120.0
+    TURN_STEP_LIMIT = 150  # turning while kneeled can be slow (~3 deg per step)
+    CALIBRATION_SECONDS = 240.0
 
     def __init__(self, legs, pose, observer, reference, calibration_path, log, clock,
                  motion=False, recalibrate=False, settle=0.7, step_seconds=0.3, speeds=None,
@@ -330,7 +330,7 @@ class Aligner:
         cal = self.cal
         cal["steps"] += 1
         if cal["steps"] % 5 == 0:
-            self.log(f"CALIBRATE turn {cal['steps']}/~30")
+            self.log(f"CALIBRATE turn step {cal['steps']}")
         if status == "ok":
             if not cal["lost"]:
                 cal["samples"].append(change(cal["prev"], value))

@@ -679,13 +679,11 @@ class ReceiverTests(unittest.TestCase):
         full.update(0, allowed=True)
         self.assertEqual(self.dog.calls, [])
         full.update(1, allowed=True)
-        self.assertEqual(self.dog.calls, [("stop",), ("reset",), ("attitude", "p", 10),
-                                          ("translation", "z", 70)])
+        self.assertEqual(self.dog.calls, [("stop",), ("reset",), ("claw", 0),
+                                          ("attitude", "p", 10), ("translation", "z", 70)])
         self.assertEqual(forgot, [1])
-        self.assertEqual((arm.pose, arm.grip, arm.sent), (None, None, {"arm": None, "claw": None}))
+        self.assertEqual((arm.pose, arm.grip, arm.sent), (None, 0.0, {"arm": None, "claw": 0}))
         self.assertEqual(posture.level, 1.0)
-        arm.set_claw(0)  # the next claw command is sent even if it equals the old one
-        self.assertEqual(self.dog.calls[-1], ("claw", 0))
         self.assertTrue(any("Full reset" in entry for entry in self.log))
 
     def test_full_reset_ignored_while_busy(self):
@@ -704,6 +702,14 @@ class ReceiverTests(unittest.TestCase):
     def test_start_standing_flag(self):
         self.assertFalse(receiver.build_parser().parse_args([]).start_standing)
         self.assertTrue(receiver.build_parser().parse_args(["--start-standing"]).start_standing)
+
+    def test_alignment_legs_bypass_heading_hold(self):
+        import heading
+
+        hold = heading.HeadingHold(lambda: 0.0, FakeClock(), log=self.log.append, sign=1, bias=0.0)
+        wrapped = heading.HeadingDriver(self.driver, hold)
+        self.assertIs(receiver.alignment_legs_driver(wrapped), self.driver)
+        self.assertIs(receiver.alignment_legs_driver(self.driver), self.driver)
 
     def test_heading_flags(self):
         args = receiver.build_parser().parse_args([])

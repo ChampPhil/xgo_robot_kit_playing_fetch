@@ -289,9 +289,16 @@ class AlignerTests(AlignerHarness):
         self.assertLess(len([s for s in self.robot.steps if s[0] == "turn"]), first)
         self.assertFalse(self.said("CALIBRATE turn"))
 
+    def test_slow_kneeled_turns_still_complete_the_calibration(self):
+        self.make(deg_per_step=3.0)  # ~120 steps for a full turn
+        self.run_for(240)
+        calibration = align.load_calibration(self.cal_path)
+        self.assertIsNotNone(calibration, self.log[-3:])
+        self.assertTrue(2.5 <= calibration["deg_per_turn_step"] <= 4.0)
+
     def test_calibration_aborts_if_the_box_never_comes_back(self):
         self.make(box_returns=False)
-        self.run_for(120)
+        self.run_for(260)  # past the 150-step / 240 s calibration limit
         self.assertTrue(self.said("not seen again"))
         self.assertIsNone(align.load_calibration(self.cal_path))
         self.assertIsNone(self.robot.moving)
