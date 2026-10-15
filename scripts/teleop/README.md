@@ -77,8 +77,9 @@ One press does the whole job: **full reset** (claw open, fully kneeled, arm back
 so the camera sees exactly what it saw for the reference photo), 1.5 s to settle, **align by
 itself** with the latest recording's start view (calibrating with the 360° turn the first time),
 then **replay the recorded pickup** once aligned. Nothing needs to be held. **F again, any
-movement key, clicking out of the keyboard window, Esc, or a lost connection cancels** it and
-stops the legs. It is ignored while recording or replaying, and needs `--align-motion`.
+movement key, Esc, Ctrl+C in the terminal, or a lost connection cancels** it and stops the legs.
+Clicking away from the keyboard window does *not* cancel a fetch (it only releases held keys);
+click back into the window to cancel with F or Esc. It is ignored while recording or replaying, and needs `--align-motion`.
 
 ## Start position and full reset
 

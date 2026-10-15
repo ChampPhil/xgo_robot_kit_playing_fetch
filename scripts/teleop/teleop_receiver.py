@@ -539,8 +539,8 @@ class FullReset:
 
 class Fetcher:
     """F: full reset (camera pose = the reference's), settle, align without a button held,
-    then replay the recorded pickup. F again, any manual input, losing the keyboard window's
-    focus or the watchdog cancels it."""
+    then replay the recorded pickup. F again, any manual input or the watchdog cancels it;
+    clicking away from the keyboard window does not (it only releases held keys)."""
 
     def __init__(self, fullreset, aligner, teach, log, clock, motion, settle=1.5,
                  align_status=None):
@@ -575,8 +575,8 @@ class Fetcher:
             self.start()
         if not self.active:
             return False
-        if manual or not attended:
-            self.cancel("manual input" if manual else "the keyboard window lost focus")
+        if manual:
+            self.cancel("manual input")
             return False
         if self.state == "settle":
             if self.clock() < self.until:
@@ -611,6 +611,7 @@ class Fetcher:
         if self.teach.busy:
             self.log("Fetch ignored while recording or replaying.")
             return
+        self.aligner.update(False, False)  # clear a refusal left by an earlier failed attempt
         self.fullreset.perform()
         self.state, self.until = "settle", self.clock() + self.settle
         self.log("FETCH: reset and kneel; F, any movement key or Esc cancels.")

@@ -758,9 +758,10 @@ class ReceiverTests(unittest.TestCase):
     def test_fetch_resets_settles_aligns_then_replays(self):
         fetcher = self.make_fetcher()
         self.assertTrue(self.fetch_tick(fetcher, 1))
-        self.assertEqual(self.events, ["full-reset"])
+        start = [("align", False, False), "full-reset"]  # clear any old refusal, then reset
+        self.assertEqual(self.events, start)
         self.fetch_tick(fetcher, 1, seconds=1.0)
-        self.assertEqual(self.events, ["full-reset"])  # still settling
+        self.assertEqual(self.events, start)  # still settling
         self.fetch_tick(fetcher, 1, seconds=0.6)
         self.assertEqual(self.events[-1], ("align", True, False))
         self.align_state["aligned"] = True
@@ -780,19 +781,49 @@ class ReceiverTests(unittest.TestCase):
         self.assertFalse(self.fetch_tick(fetcher, 1))
         self.assertTrue(any("could not start" in entry for entry in self.log))
 
-    def test_fetch_cancelled_by_f_again_manual_input_or_lost_focus(self):
-        for how in ("again", "manual", "unattended"):
+    def test_fetch_cancelled_by_f_again_or_manual_input(self):
+        for how in ("again", "manual"):
             fetcher = self.make_fetcher()
             self.fetch_tick(fetcher, 1)
             self.fetch_tick(fetcher, 1, seconds=2.0)  # aligning now
             self.assertTrue(self.align_state["active"], how)
             presses = 2 if how == "again" else 1
-            owned = self.fetch_tick(fetcher, presses, manual=how == "manual",
-                                    attended=how != "unattended")
+            owned = self.fetch_tick(fetcher, presses, manual=how == "manual")
             self.assertFalse(owned, how)
             self.assertFalse(self.align_state["active"], how)  # alignment released: legs stop
             self.assertTrue(any("FETCH cancelled" in entry for entry in self.log), how)
             self.log.clear()
+
+    def test_fetch_keeps_going_when_the_keyboard_window_loses_focus(self):
+        fetcher = self.make_fetcher()
+        self.fetch_tick(fetcher, 1)
+        self.fetch_tick(fetcher, 1, seconds=2.0)
+        self.assertTrue(self.fetch_tick(fetcher, 1, attended=False))
+        self.assertTrue(self.align_state["active"])
+        self.assertFalse(any("cancelled" in entry for entry in self.log))
+
+    def test_a_failed_fetch_does_not_block_the_next_one(self):
+        import align
+
+        log = []
+        aligner = align.Aligner(
+            legs=SimpleNamespace(step=lambda p, a: None, stop=lambda: None),
+            pose=SimpleNamespace(prepare=lambda kneel, arm: None),
+            observer=SimpleNamespace(begin=lambda t: None,
+                                     poll=lambda: ("lost", "no purple box in view")),
+            reference=lambda: {"features": {"u": 0.5, "v": 0.6, "h": 0.2},
+                               "state": {"kneel": 1.0, "arm": None}},
+            calibration_path=Path(tempfile.mkdtemp()) / "calibration.json", log=log.append,
+            clock=FakeClock(), motion=True)
+        teach_stub = SimpleNamespace(busy=False, replayer=SimpleNamespace(active=False),
+                                     start_replay=lambda: None)
+        fetcher = receiver.Fetcher(SimpleNamespace(perform=lambda: None), aligner, teach_stub,
+                                   log.append, aligner.clock, motion=True, settle=0)
+        for presses in (1, 2):  # second F after the first fetch failed
+            for _ in range(3):
+                aligner.clock.now += 0.05
+                fetcher.update(presses, False, True)
+        self.assertEqual(sum("box not in view" in entry for entry in log), 2, log)
 
     def test_fetch_ends_when_alignment_gives_up(self):
         fetcher = self.make_fetcher()

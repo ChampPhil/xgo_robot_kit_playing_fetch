@@ -16,7 +16,7 @@ HELP = (
     "      G/T kneel down/stand up   Space align",
     "Press: F fetch (align + pick up; any key cancels)  X record  Y replay",
     "       C reset claw  Z full reset+kneel  B bark  Esc quit",
-    "Click this window first; clicking elsewhere stops the robot.",
+    "Click this window first; clicking elsewhere releases held keys (fetch keeps going).",
 )
 
 
