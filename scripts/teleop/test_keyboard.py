@@ -94,7 +94,31 @@ class KeyTrackerTests(unittest.TestCase):
         self.assertTrue(kb.keys_to_state(tracker.held)["start"])
 
 
+class MjpegTests(unittest.TestCase):
+    def test_splits_a_stream_into_jpeg_frames(self):
+        import io
+
+        part = b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n{}\r\n"
+        stream = io.BytesIO(b"".join(part.replace(b"{}", str(len(body)).encode(), 1)
+                                     .replace(b"{}", body, 1)
+                                     for body in (b"\xff\xd8one", b"\xff\xd8second")))
+        self.assertEqual(list(kb.mjpeg_frames(stream)), [b"\xff\xd8one", b"\xff\xd8second"])
+
+    def test_truncated_stream_just_ends(self):
+        import io
+
+        stream = io.BytesIO(b"--frame\r\nContent-Length: 100\r\n\r\nshort")
+        self.assertEqual(list(kb.mjpeg_frames(stream)), [])
+
+
 class SenderKeyboardTests(unittest.TestCase):
+    def test_keyboard_window_shows_video_instead_of_a_browser_tab(self):
+        args = sender.build_parser().parse_args(["--keyboard", "--video"])
+        self.assertEqual(sender.window_video_url(args), "http://localhost:8090/stream")
+        self.assertFalse(sender.open_browser(args))
+        self.assertIsNone(sender.window_video_url(sender.build_parser().parse_args(["--keyboard"])))
+        self.assertTrue(sender.open_browser(sender.build_parser().parse_args(["--video"])))
+
     def test_keyboard_flag_disables_the_stick_deadzone(self):
         args = sender.build_parser().parse_args(["--keyboard"])
         self.assertTrue(args.keyboard)

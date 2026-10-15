@@ -178,6 +178,13 @@ including `--color`, can be given to `gamepad_sender.py`, which passes them thro
 
 ## Live video
 
+The stream shows a **red "target" box** where the box was in the latest recording's first frame
+(its reference), drawn only on the viewer's copy — recordings are untouched — and refreshed every
+2 s so a new recording shows up. With `--keyboard --video` the video appears **inside the keyboard
+window, beside the key help** (no browser tab, so the robot only encodes one stream).
+
+### How the stream is reached
+
 `gamepad_sender.py --video` shows the robot camera at `http://localhost:8090/` and opens it in
 your browser. The tailnet allows only SSH from this computer to the robot, so the receiver
 serves video on the robot's loopback (`127.0.0.1:8090`) and the sender forwards it through its

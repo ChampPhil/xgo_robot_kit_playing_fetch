@@ -794,13 +794,14 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                 posture.stand()
 
 
-def start_viewer(cam, port, log):
+def start_viewer(cam, port, log, reference=None):
     """Serve live video on the robot's loopback only; the sender reaches it via an SSH tunnel
     (the tailnet allows SSH to the robot but not other ports)."""
     import video
 
+    overlay = video.reference_overlay(reference) if reference else None
     try:
-        viewer = video.VideoServer(cam, video.LOCAL_HOST, port)
+        viewer = video.VideoServer(cam, video.LOCAL_HOST, port, overlay=overlay)
         viewer.start()
     except (OSError, RuntimeError) as exc:
         log(f"Live video unavailable: {exc}.")
@@ -868,7 +869,10 @@ def main(argv=None):
                                                  driver=driver),
             Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log,
             settle=args.settle)
-        viewer = start_viewer(cam, args.video_port, log) if args.video_port else None
+        viewer = start_viewer(
+            cam, args.video_port, log,
+            reference=lambda: teach_module.load_reference(Path(args.teach_dir).expanduser()),
+        ) if args.video_port else None
         import align as align_module
 
         teach_dir = Path(args.teach_dir).expanduser()

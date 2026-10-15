@@ -206,6 +206,15 @@ def video_url(args):
     return f"http://localhost:{VIDEO_PORT}/"  # forwarded through the SSH session
 
 
+def window_video_url(args):
+    """The keyboard window shows the live video itself when both options are on."""
+    return f"http://localhost:{VIDEO_PORT}/stream" if args.keyboard and args.video else None
+
+
+def open_browser(args):
+    return args.video and not args.keyboard  # one viewer: the robot encodes per viewer
+
+
 def start_ssh(args):
     # The tailnet only allows SSH to the robot, so live video is forwarded inside the session.
     tunnel = ["-L", f"{VIDEO_PORT}:127.0.0.1:{VIDEO_PORT}"] if args.video else []
@@ -289,7 +298,7 @@ def main(argv=None):
             return None
         try:
             import keyboard_input
-            window = keyboard_input.KeyboardPad()
+            window = keyboard_input.KeyboardPad(video_url=window_video_url(args))
         except ImportError:
             parser.exit(2, missing)
         print("Keyboard: click the 'XGO keyboard control' window, then hold keys "
@@ -311,10 +320,13 @@ def main(argv=None):
             parser.error("confirmation requires a terminal; use --yes only when it is safe")
     reader = keyboard_reader()  # before SSH, so a window failure leaves nothing running
     ssh = start_ssh(args)
-    if args.video:
+    if open_browser(args):
         url = video_url(args)
         print(f"Live video: {url} (opens once the robot is ready)", file=sys.stderr)
         threading.Timer(4.0, webbrowser.open, args=(url,)).start()
+    elif args.video:
+        print("Live video: shown in the keyboard window (red box = recording's start).",
+              file=sys.stderr)
     if not args.keyboard:
         print(("Hold LB to walk" if not args.no_deadman else "Centre the sticks, then walk")
               + "; hold RB to move the arm/claw; LT + D-pad down/up kneels/stands; B barks; "
