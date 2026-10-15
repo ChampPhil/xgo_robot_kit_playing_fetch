@@ -102,7 +102,7 @@ def make_command(left_x, left_y, right_x, enable, deadzone):
 
 
 def make_message(state, arming, deadzone, barks, records=0, replays=0, resets=0,
-                 full_resets=0):
+                 full_resets=0, fetches=0):
     """Full command line: walking (LB), arm mode (RB, which overrides walking) and barks."""
     command = make_command(state["left_x"], state["left_y"], state["right_x"], False, deadzone)
     command["enable"] = arming.enable(command, state["lb"]) and not state["rb"]
@@ -118,6 +118,8 @@ def make_message(state, arming, deadzone, barks, records=0, replays=0, resets=0,
     command["align"] = state["a"]  # A held: align with the latest recording
     command["reset"] = resets  # BACK presses: open the claw, arm to its start pose
     command["full_reset"] = full_resets  # RT / Z presses: full robot reset, then kneel
+    command["fetch"] = fetches  # F presses (keyboard): reset, align by itself, replay
+    command["attended"] = state.get("attended", True)  # keyboard window has focus
     # LT + D-pad: kneel. Independent of LB/RB, so the arm still works while knelt.
     command["kneel"] = (int(state["dpad_down"]) - int(state["dpad_up"])) if state["lt"] else 0
     return command
@@ -239,7 +241,7 @@ def stream(pygame, pad, out, args, ssh=None, reader=None):
     deadzone = effective_deadzone(args)
     arming = Arming(deadman=not args.no_deadman)
     period = 1.0 / args.rate
-    presses = {"b": 0, "x": 0, "y": 0, "back": 0, "rt": 0}
+    presses = {"b": 0, "x": 0, "y": 0, "back": 0, "rt": 0, "fetch": 0}
     was_down = dict.fromkeys(presses, False)
     next_tick = time.monotonic()
     while True:
@@ -249,12 +251,14 @@ def stream(pygame, pad, out, args, ssh=None, reader=None):
         if state["start"]:
             return
         for button in presses:  # counters, so a skipped line cannot lose a press
-            if state[button] and not was_down[button]:
+            down = state.get(button, False)  # the gamepad has no fetch button
+            if down and not was_down[button]:
                 presses[button] += 1
-            was_down[button] = state[button]
+            was_down[button] = down
         command = make_message(state, arming, deadzone, presses["b"],
                                records=presses["x"], replays=presses["y"],
-                               resets=presses["back"], full_resets=presses["rt"])
+                               resets=presses["back"], full_resets=presses["rt"],
+                               fetches=presses["fetch"])
         out.write(json.dumps(command) + "\n")
         out.flush()
         if ssh is not None:

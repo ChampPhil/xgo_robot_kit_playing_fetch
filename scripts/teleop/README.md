@@ -65,11 +65,20 @@ another window releases everything (the robot stops). Keys give fixed speeds (ha
 | **I / K** | Arm up / down | **B** | Bark |
 | **J / L** | Arm in / out | **Esc**, Ctrl+C | Quit (the robot stops and stands) |
 | **U / O** | Claw open / close | **Z** | Full reset: claw fully open, kneel fully |
-| **F / R** | Kneel down / stand up | | |
+| **G / T** | Kneel down / stand up | **F** | **Fetch**: reset, align by itself, pick up |
 | **Shift** | Full speed (with the keys above) | | |
 | **Space** | Align (same as holding A) | | |
 
 Arm keys take over from walk keys (walking stops while the arm moves), like RB on the gamepad.
+
+## Fetch (keyboard F, needs `--align-motion`)
+
+One press does the whole job: **full reset** (claw open, fully kneeled, arm back to its default,
+so the camera sees exactly what it saw for the reference photo), 1.5 s to settle, **align by
+itself** with the latest recording's start view (calibrating with the 360° turn the first time),
+then **replay the recorded pickup** once aligned. Nothing needs to be held. **F again, any
+movement key, clicking out of the keyboard window, Esc, or a lost connection cancels** it and
+stops the legs. It is ignored while recording or replaying, and needs `--align-motion`.
 
 ## Start position and full reset
 

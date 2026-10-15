@@ -151,7 +151,8 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(json.loads(output), {"x": 1.0, "y": 0.0, "yaw": 0.0, "enable": True,
                                               "arm": False, "ax": 0.0, "az": 0.0, "claw": 0.0,
                                               "bark": 0, "kneel": 0, "record": 0, "replay": 0,
-                                              "align": False, "reset": 0, "full_reset": 0})
+                                              "align": False, "reset": 0, "full_reset": 0,
+                                              "fetch": 0, "attended": True})
 
     def state(self, **overrides):
         state = dict(left_x=0.0, left_y=0.0, right_x=0.0, lb=False, rb=False, b=False, start=False,
@@ -167,7 +168,7 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(message, {"x": 1.0, "y": -1.0, "yaw": -1.0, "enable": False,
                                    "arm": True, "ax": 1.0, "az": 1.0, "claw": 1.0, "bark": 2,
                                    "kneel": 0, "record": 0, "replay": 0, "align": False,
-                                   "reset": 0, "full_reset": 0})
+                                   "reset": 0, "full_reset": 0, "fetch": 0, "attended": True})
         message = sender.make_message(self.state(left_x=-1, left_y=1, right_x=-1, rb=True),
                                       arming, 0.1, barks=2)
         self.assertEqual((message["ax"], message["az"], message["claw"]), (-1.0, -1.0, -1.0))
@@ -194,6 +195,13 @@ class SenderTests(unittest.TestCase):
         message = sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0,
                                       full_resets=3)
         self.assertEqual(message["full_reset"], 3)
+
+    def test_fetch_counter_and_attention_are_sent(self):
+        message = sender.make_message(self.state(attended=False), sender.Arming(deadman=True),
+                                      0.1, 0, fetches=4)
+        self.assertEqual((message["fetch"], message["attended"]), (4, False))
+        self.assertTrue(sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0)
+                        ["attended"])
 
     def test_back_press_counter_is_sent_as_reset(self):
         message = sender.make_message(self.state(), sender.Arming(deadman=True), 0.1, 0,
@@ -710,6 +718,126 @@ class ReceiverTests(unittest.TestCase):
         wrapped = heading.HeadingDriver(self.driver, hold)
         self.assertIs(receiver.alignment_legs_driver(wrapped), self.driver)
         self.assertIs(receiver.alignment_legs_driver(self.driver), self.driver)
+
+    def make_fetcher(self, motion=True):
+        self.clock = FakeClock()
+        self.events = []
+        self.align_state = {"active": False, "aligned": False}
+
+        def align_update(held, manual):
+            self.events.append(("align", held, manual))
+            if not held or manual:
+                self.align_state.update(active=False, aligned=False)
+                return False
+            self.align_state["active"] = True
+            return True
+
+        self.aligner = SimpleNamespace(
+            update=align_update, watchdog=lambda: self.events.append("align-watchdog"))
+        self.aligner_view = lambda: (self.align_state["active"], self.align_state["aligned"])
+        self.replaying = {"on": False}
+        self.teach = SimpleNamespace(busy=False, replayer=SimpleNamespace(active=False))
+
+        def start_replay():  # like TeachController: the replay is running on return
+            self.events.append("replay")
+            self.replaying["on"] = True
+            self.teach.replayer.active = True
+
+        self.teach.start_replay = start_replay
+        self.fullreset = SimpleNamespace(perform=lambda: self.events.append("full-reset"))
+        fetcher = receiver.Fetcher(self.fullreset, self.aligner, self.teach, self.log.append,
+                                   self.clock, motion=motion, settle=1.5,
+                                   align_status=self.aligner_view)
+        return fetcher
+
+    def fetch_tick(self, fetcher, presses, seconds=0.05, manual=False, attended=True):
+        self.clock.now += seconds
+        self.teach.replayer.active = self.replaying["on"]
+        return fetcher.update(presses, manual, attended)
+
+    def test_fetch_resets_settles_aligns_then_replays(self):
+        fetcher = self.make_fetcher()
+        self.assertTrue(self.fetch_tick(fetcher, 1))
+        self.assertEqual(self.events, ["full-reset"])
+        self.fetch_tick(fetcher, 1, seconds=1.0)
+        self.assertEqual(self.events, ["full-reset"])  # still settling
+        self.fetch_tick(fetcher, 1, seconds=0.6)
+        self.assertEqual(self.events[-1], ("align", True, False))
+        self.align_state["aligned"] = True
+        self.fetch_tick(fetcher, 1)
+        self.assertEqual(self.events[-2:], [("align", False, False), "replay"])
+        self.assertTrue(self.fetch_tick(fetcher, 1))  # replay in progress: still fetching
+        self.replaying["on"] = False
+        self.assertFalse(self.fetch_tick(fetcher, 1))
+        self.assertTrue(any("FETCH done" in entry for entry in self.log))
+
+    def test_fetch_stops_if_the_replay_cannot_start(self):
+        fetcher = self.make_fetcher()
+        self.teach.start_replay = lambda: self.events.append("no recording")
+        self.fetch_tick(fetcher, 1)
+        self.fetch_tick(fetcher, 1, seconds=2.0)
+        self.align_state["aligned"] = True
+        self.assertFalse(self.fetch_tick(fetcher, 1))
+        self.assertTrue(any("could not start" in entry for entry in self.log))
+
+    def test_fetch_cancelled_by_f_again_manual_input_or_lost_focus(self):
+        for how in ("again", "manual", "unattended"):
+            fetcher = self.make_fetcher()
+            self.fetch_tick(fetcher, 1)
+            self.fetch_tick(fetcher, 1, seconds=2.0)  # aligning now
+            self.assertTrue(self.align_state["active"], how)
+            presses = 2 if how == "again" else 1
+            owned = self.fetch_tick(fetcher, presses, manual=how == "manual",
+                                    attended=how != "unattended")
+            self.assertFalse(owned, how)
+            self.assertFalse(self.align_state["active"], how)  # alignment released: legs stop
+            self.assertTrue(any("FETCH cancelled" in entry for entry in self.log), how)
+            self.log.clear()
+
+    def test_fetch_ends_when_alignment_gives_up(self):
+        fetcher = self.make_fetcher()
+        self.fetch_tick(fetcher, 1)
+        self.fetch_tick(fetcher, 1, seconds=2.0)
+        self.align_state["active"] = False  # the aligner stopped itself (box lost, ...)
+        self.aligner.update = lambda held, manual: False
+        self.assertFalse(self.fetch_tick(fetcher, 1))
+        self.assertNotIn("replay", self.events)
+        self.assertTrue(any("FETCH stopped" in entry for entry in self.log))
+
+    def test_fetch_needs_align_motion_and_an_idle_robot(self):
+        fetcher = self.make_fetcher(motion=False)
+        self.assertFalse(self.fetch_tick(fetcher, 1))
+        self.assertTrue(any("--align-motion" in entry for entry in self.log))
+        fetcher = self.make_fetcher()
+        self.teach.busy = True
+        self.assertFalse(self.fetch_tick(fetcher, 1))
+        self.assertEqual(self.events, [])
+
+    def test_fetch_watchdog_cancels(self):
+        fetcher = self.make_fetcher()
+        self.fetch_tick(fetcher, 1)
+        self.fetch_tick(fetcher, 1, seconds=2.0)
+        fetcher.watchdog()
+        self.assertFalse(fetcher.active)
+        self.assertFalse(self.align_state["active"])
+
+    def test_fetch_and_attended_fields_parse(self):
+        message = receiver.parse_message(line(fetch=2, attended=False))
+        self.assertEqual((message.fetch, message.attended), (2, False))
+        message = receiver.parse_message(line())
+        self.assertEqual((message.fetch, message.attended), (0, True))
+
+    def test_run_gives_fetch_the_robot(self):
+        calls = []
+        fetcher = SimpleNamespace(update=lambda presses, manual, attended:
+                                  calls.append((presses, manual, attended)) or True,
+                                  watchdog=lambda: calls.append("watchdog"))
+        aligner = SimpleNamespace(update=lambda held, manual: calls.append("align") or False,
+                                  watchdog=lambda: None)
+        receiver.run(self.driver, Paced(line(fetch=1, enable=True, x=1.0), QUIET, receiver.EOF),
+                     0.5, self.log.append, aligner=aligner, fetcher=fetcher)
+        self.assertEqual(calls, [(1, True, True), "watchdog"])  # aligner left to fetch
+        self.assertNotIn(("x", 12), self.dog.calls)  # manual walking ignored while fetching
 
     def test_heading_flags(self):
         args = receiver.build_parser().parse_args([])

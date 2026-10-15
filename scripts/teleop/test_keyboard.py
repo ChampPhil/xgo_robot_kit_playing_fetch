@@ -47,8 +47,10 @@ class KeyMappingTests(unittest.TestCase):
         self.assertFalse(command["enable"])  # walking stops while the arm moves
 
     def test_kneel_align_and_buttons(self):
-        self.assertEqual(message("f")["kneel"], 1)
-        self.assertEqual(message("r")["kneel"], -1)
+        self.assertEqual(message("g")["kneel"], 1)  # G kneels down (F is fetch now)
+        self.assertEqual(message("t")["kneel"], -1)  # T stands up
+        self.assertEqual(message("f")["kneel"], 0)
+        self.assertTrue(kb.keys_to_state({"f"})["fetch"])
         self.assertTrue(message("space")["align"])
         state = kb.keys_to_state({"x", "y", "c", "b", "escape", "z"})
         self.assertTrue(all(state[k] for k in ("x", "y", "back", "b", "start", "rt")))
@@ -76,6 +78,15 @@ class KeyTrackerTests(unittest.TestCase):
             state = kb.keys_to_state(tracker.held)
             self.assertTrue(state["start"], ctrl)
             self.assertFalse(state["back"], ctrl)
+
+    def test_focus_is_tracked_for_fetch(self):
+        tracker = kb.KeyTracker()
+        self.assertTrue(tracker.focused)
+        tracker.process([("focus_lost",)])
+        self.assertFalse(tracker.focused)
+        self.assertFalse(kb.keys_to_state(tracker.held, tracker.focused)["attended"])
+        tracker.process([("focus_gained",)])
+        self.assertTrue(tracker.focused)
 
     def test_closing_the_window_quits(self):
         tracker = kb.KeyTracker()

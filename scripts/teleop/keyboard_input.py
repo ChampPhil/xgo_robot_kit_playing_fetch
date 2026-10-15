@@ -13,8 +13,9 @@ ARM_KEYS = {"i", "k", "j", "l", "u", "o"}
 HELP = (
     "Hold: W/S walk  A/D side-step  Q/E turn  (Shift = full speed)",
     "      I/K arm up/down  J/L arm in/out  U/O claw open/close",
-    "      F/R kneel down/stand up   Space align",
-    "Press: X record  Y replay  C reset claw  Z full reset+kneel  B bark  Esc quit",
+    "      G/T kneel down/stand up   Space align",
+    "Press: F fetch (align + pick up; any key cancels)  X record  Y replay",
+    "       C reset claw  Z full reset+kneel  B bark  Esc quit",
     "Click this window first; clicking elsewhere stops the robot.",
 )
 
@@ -23,7 +24,7 @@ def axis(held, negative, positive, speed):
     return speed * ((positive in held) - (negative in held))
 
 
-def keys_to_state(held):
+def keys_to_state(held, focused=True):
     """Map the set of held key names to the controller state used by make_message."""
     speed = FULL if any(key in held for key in SHIFT_KEYS) else HALF
     arm_mode = bool(held & ARM_KEYS)
@@ -39,8 +40,10 @@ def keys_to_state(held):
         "left_x": left_x, "left_y": left_y, "right_x": right_x,
         "lb": not arm_mode and bool(held & WALK_KEYS),  # holding a walk key is the dead-man
         "rb": arm_mode,
-        "lt": "f" in held or "r" in held,
-        "dpad_down": "f" in held, "dpad_up": "r" in held,
+        "lt": "g" in held or "t" in held,
+        "dpad_down": "g" in held, "dpad_up": "t" in held,  # G kneels down, T stands up
+        "fetch": "f" in held,
+        "attended": focused,
         "a": "space" in held,
         "x": "x" in held, "y": "y" in held, "back": "c" in held, "b": "b" in held,
         "rt": "z" in held,  # full reset, then kneel
@@ -53,6 +56,7 @@ class KeyTracker:
 
     def __init__(self):
         self.held = set()
+        self.focused = True
 
     def process(self, events):
         for event in events:
@@ -65,6 +69,9 @@ class KeyTracker:
                 self.held.discard(event[1])
             elif event[0] == "focus_lost":
                 self.held.clear()  # keys released while unfocused would never report "up"
+                self.focused = False
+            elif event[0] == "focus_gained":
+                self.focused = True
             elif event[0] == "quit":
                 self.held = {"escape"}
 
@@ -85,7 +92,7 @@ class KeyboardPad:
         # still quits (and stops the robot) instead of being swallowed.
         signal.signal(signal.SIGINT, signal.default_int_handler)
         pygame.font.init()
-        self.screen = pygame.display.set_mode((620, 190))
+        self.screen = pygame.display.set_mode((640, 220))
         pygame.display.set_caption("XGO keyboard control")
         self.font = pygame.font.SysFont(None, 22)
         self.tracker = KeyTracker()
@@ -99,12 +106,14 @@ class KeyboardPad:
                 yield "up", pygame.key.name(event.key)
             elif event.type == pygame.WINDOWFOCUSLOST:
                 yield ("focus_lost",)
+            elif event.type == pygame.WINDOWFOCUSGAINED:
+                yield ("focus_gained",)
             elif event.type == pygame.QUIT:
                 yield ("quit",)
 
     def read(self):
         self.tracker.process(list(self.events()))
-        state = keys_to_state(self.tracker.held)
+        state = keys_to_state(self.tracker.held, self.tracker.focused)
         self.draw()
         return state
 

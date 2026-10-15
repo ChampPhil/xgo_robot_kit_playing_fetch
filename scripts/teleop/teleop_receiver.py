@@ -196,6 +196,8 @@ class Message(NamedTuple):
     align: bool = False  # A held: align with the latest recording's reference
     reset: int = 0  # BACK presses: open the claw and move the arm to its start pose
     full_reset: int = 0  # RT / Z presses: full robot reset, then kneel
+    fetch: int = 0  # F presses: reset, align by itself, then replay the pickup
+    attended: bool = True  # False when the keyboard window lost focus
 
 
 def counter(message, key):
@@ -229,7 +231,8 @@ def parse_message(line):
     manual = any(sticks.values()) or arm is not None or kneel != 0
     return Message(walk, arm, bark, kneel, record, replay, message, manual,
                    message.get("align") is True, counter(message, "reset"),
-                   counter(message, "full_reset"))
+                   counter(message, "full_reset"), counter(message, "fetch"),
+                   message.get("attended", True) is not False)
 
 
 def parse_command(line):
@@ -518,6 +521,9 @@ class FullReset:
         if not allowed:
             self.log("Full reset ignored during recording, replay or alignment.")
             return
+        self.perform()
+
+    def perform(self):
         self.driver.stop()
         self.dog.reset()  # xgolib: action 255, then 0.75 s for the robot to settle
         self.arm.forget()
@@ -529,6 +535,100 @@ class FullReset:
         self.posture.set_level(1.0)
         self.log("Full reset done; claw open, kneeling. Stand still ~3 s so heading hold can "
                  "re-measure the gyro drift.")
+
+
+class Fetcher:
+    """F: full reset (camera pose = the reference's), settle, align without a button held,
+    then replay the recorded pickup. F again, any manual input, losing the keyboard window's
+    focus or the watchdog cancels it."""
+
+    def __init__(self, fullreset, aligner, teach, log, clock, motion, settle=1.5,
+                 align_status=None):
+        self.fullreset = fullreset
+        self.aligner = aligner
+        self.teach = teach
+        self.log = log
+        self.clock = clock
+        self.motion = motion
+        self.settle = settle
+        self.align_status = align_status or (lambda: (aligner.active,
+                                                      aligner.phase == "aligned"))
+        self.state = None
+        self.seen = 0
+
+    @property
+    def active(self):
+        return self.state is not None
+
+    @property
+    def replaying(self):
+        return self.state == "replay"
+
+    def update(self, presses, manual, attended):
+        """Call once per message. True while fetch owns the legs, arm and kneel."""
+        pressed = presses > self.seen
+        self.seen = presses
+        if pressed:
+            if self.active:
+                self.cancel("F pressed again")
+                return False
+            self.start()
+        if not self.active:
+            return False
+        if manual or not attended:
+            self.cancel("manual input" if manual else "the keyboard window lost focus")
+            return False
+        if self.state == "settle":
+            if self.clock() < self.until:
+                return True
+            self.state = "align"
+            self.log("FETCH: aligning with the recording's start view...")
+        if self.state == "align":
+            self.aligner.update(True, False)
+            active, aligned = self.align_status()
+            if aligned:
+                self.aligner.update(False, False)  # hand the robot over to the replay
+                self.teach.start_replay()
+                if not self.teach.replayer.active:
+                    self.end("FETCH stopped: the pickup replay could not start")
+                    return False
+                self.state = "replay"
+                self.log("FETCH: aligned; replaying the pickup...")
+                return True
+            if not active:
+                self.end("FETCH stopped: alignment did not finish (reason above)")
+                return False
+            return True
+        if self.teach.replayer.active:
+            return True
+        self.end("FETCH done.")
+        return False
+
+    def start(self):
+        if not self.motion:
+            self.log("Fetch needs --align-motion (it walks by itself).")
+            return
+        if self.teach.busy:
+            self.log("Fetch ignored while recording or replaying.")
+            return
+        self.fullreset.perform()
+        self.state, self.until = "settle", self.clock() + self.settle
+        self.log("FETCH: reset and kneel; F, any movement key or Esc cancels.")
+
+    def cancel(self, reason):
+        if self.state == "align":
+            self.aligner.update(False, False)  # stops the legs
+        elif self.state == "replay" and hasattr(self.teach, "watchdog"):
+            self.teach.watchdog()  # aborts the replay and stops the legs
+        self.end(f"FETCH cancelled: {reason}.")
+
+    def end(self, text):
+        self.state = None
+        self.log(text)
+
+    def watchdog(self):
+        if self.active:
+            self.cancel("no commands")
 
 
 def alignment_legs_driver(driver):
@@ -597,7 +697,7 @@ def latest(lines, line):
 
 
 def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ramp=None,
-        posture=None, teach=None, aligner=None, resetter=None, fullreset=None):
+        posture=None, teach=None, aligner=None, resetter=None, fullreset=None, fetcher=None):
     """Apply commands until the stream ends; always leaves the robot stopped."""
     try:
         while True:
@@ -620,6 +720,8 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                         teach.watchdog()
                     if aligner is not None:
                         aligner.watchdog()
+                    if fetcher is not None:
+                        fetcher.watchdog()
                     continue
             line = latest(lines, line)
             if line is EOF:
@@ -640,9 +742,14 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                     posture.update(0)
                 if aligner is not None:
                     aligner.watchdog()
+                if fetcher is not None:
+                    fetcher.watchdog()
                 continue
-            aligning = False
-            if aligner is not None:
+            fetching = fetcher is not None and fetcher.update(message.fetch, message.manual,
+                                                              message.attended)
+            fetch_replay = fetching and getattr(fetcher, "replaying", False)
+            aligning = fetching and not fetch_replay  # fetch drives the aligner itself
+            if aligner is not None and not fetching:
                 busy = teach is not None and teach.busy  # A is ignored while recording/replaying
                 aligning = aligner.update(message.align and not busy, message.manual)
             replaying = teach is not None and teach.update(message, message.manual,
@@ -779,11 +886,14 @@ def main(argv=None):
             step_seconds=args.align_step, speeds=speeds,
             tol={"u": args.tol_u, "h": args.tol_h, "v": args.tol_v},
             max_steps=int(args.align_max_steps))
+        fullreset = FullReset(dog, driver, arm, posture, ramp, log)
+        fetcher = Fetcher(fullreset, aligner, controller, log, time.monotonic,
+                          motion=args.align_motion)
         try:
             run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
                 ramp=ramp, posture=posture, teach=controller,
                 aligner=aligner, resetter=ResetButton(arm, args, log),
-                fullreset=FullReset(dog, driver, arm, posture, ramp, log))
+                fullreset=fullreset, fetcher=fetcher)
         finally:
             if viewer is not None:
                 viewer.close()
