@@ -293,7 +293,8 @@ def load_reference(root):
         return None
     try:
         data = json.loads((session / "reference.json").read_text())
-        return {"features": data["features"], "state": data.get("state") or {}}
+        return {"features": data["features"], "state": data.get("state") or {},
+                "image": session / "reference.jpg"}
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -301,9 +302,11 @@ def load_reference(root):
 class Replayer:
     """Play a recorded motion through the arm/kneel controllers, driven by tick()."""
 
-    def __init__(self, arm, posture, clock=time.monotonic, settle=1.0, driver=None):
+    def __init__(self, arm, posture, clock=time.monotonic, settle=1.0, driver=None,
+                 max_gap=0.5):
         self.arm = arm
         self.posture = posture
+        self.max_gap = max_gap  # pauses longer than this are shortened to it (0: keep timing)
         self.driver = driver  # legs: recorded walking is replayed blind
         self.clock = clock
         self.settle = settle
@@ -323,14 +326,26 @@ class Replayer:
             self.posture.set_level(value)
 
     def start(self, motion):
-        self.events = sorted(motion["events"], key=lambda event: event["t"])
-        self.duration = motion.get("duration", self.events[-1]["t"] if self.events else 0)
+        self.events = self.shorten(sorted(motion["events"], key=lambda event: event["t"]))
+        self.duration = (self.events[-1]["t"] if self.events else 0) if self.max_gap else \
+            motion.get("duration", self.events[-1]["t"] if self.events else 0)
         start = motion["start"]
         for kind in ("kneel", "arm", "claw"):  # posture first: it moves the arm base
             self.apply(kind, start.get(kind))
         self.begin = self.clock() + self.settle
         self.index = 0
         self.active = True
+
+    def shorten(self, events):
+        """Cap idle pauses (including the wait before the first move) at max_gap seconds."""
+        if not self.max_gap:
+            return events
+        shortened, previous, when = [], 0.0, 0.0
+        for event in events:
+            when += min(event["t"] - previous, self.max_gap)
+            previous = event["t"]
+            shortened.append(dict(event, t=round(when, 3)))
+        return shortened
 
     def tick(self):
         if not self.active:

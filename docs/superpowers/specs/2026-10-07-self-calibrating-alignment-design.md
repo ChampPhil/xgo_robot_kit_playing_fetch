@@ -1,5 +1,15 @@
 # Self-calibrating alignment (hold A): design
 
+> **Revision 2026-10-15 (supersedes the stepping/360° sections below).** A pulse probe on the
+> robot showed leg commands do nothing for the first ~0.5 s, so the 0.3 s stop-and-look steps
+> never moved it, and the gyro tracks turns well after the startup reset. Alignment is now
+> `GyroAligner`: one-off 15° calibration turn toward the box (degrees per image width, gyro
+> sign), gyro-closed-loop turns computed from the box's image offset, timed walk segments
+> planned from the linear fall of 1/apparent-height, half speed for short final corrections,
+> a wider purple range with dominant-blob selection for far (~60 cm) boxes, and replays with
+> pauses capped at 0.5 s. Goal: fetch in under ~70 s. The rest of this document is the
+> original design, kept for history.
+
 Date: 2026-10-07. Status: approved direction (user chose option 2 + 360° calibration turn);
 supersedes the "Alignment (hold A)" section of `2026-10-05-teach-and-repeat-design.md`.
 

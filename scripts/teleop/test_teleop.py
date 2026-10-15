@@ -182,10 +182,10 @@ class SenderTests(unittest.TestCase):
     def test_receiver_options_pass_through(self):
         args = sender.build_parser().parse_args(
             ["--color", "orange", "--settle", "1", "--align-motion", "--recalibrate",
-             "--align-turn", "15", "--tol-u", "0.03"])
+             "--align-turn", "35", "--tol-u", "0.03"])
         command = sender.remote_command(args)
         for part in ("--color orange", "--settle 1", "--align-motion", "--recalibrate",
-                     "--align-turn 15", "--tol-u 0.03"):
+                     "--align-turn 35", "--tol-u 0.03"):
             self.assertIn(part, command)
         plain = sender.remote_command(sender.build_parser().parse_args([]))
         self.assertNotIn("--align-motion", plain)
@@ -806,11 +806,12 @@ class ReceiverTests(unittest.TestCase):
         import align
 
         log = []
-        aligner = align.Aligner(
+        aligner = align.GyroAligner(
             legs=SimpleNamespace(step=lambda p, a: None, stop=lambda: None),
             pose=SimpleNamespace(prepare=lambda kneel, arm: None),
             observer=SimpleNamespace(begin=lambda t: None,
                                      poll=lambda: ("lost", "no purple box in view")),
+            read_yaw=lambda: 0.0,
             reference=lambda: {"features": {"u": 0.5, "v": 0.6, "h": 0.2},
                                "state": {"kneel": 1.0, "arm": None}},
             calibration_path=Path(tempfile.mkdtemp()) / "calibration.json", log=log.append,
@@ -870,6 +871,18 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(calls, [(1, True, True), "watchdog"])  # aligner left to fetch
         self.assertNotIn(("x", 12), self.dog.calls)  # manual walking ignored while fetching
 
+    def test_alignment_measures_far_dark_boxes_and_rescales_the_reference(self):
+        import cv2
+        import numpy as np
+
+        hsv = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.rectangle(hsv, (300, 200), (312, 211), (165, 55, 40), -1)  # far, dark, magenta-ish
+        cv2.rectangle(hsv, (224, 52), (228, 58), (165, 60, 45), -1)  # a background speck
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        features, reason = receiver.alignment_measure("purple")(frame)
+        self.assertIsNone(reason)
+        self.assertEqual(features["bbox"][:2], [300, 200])
+
     def test_heading_flags(self):
         args = receiver.build_parser().parse_args([])
         self.assertEqual((args.no_heading_hold, args.heading_gain, args.heading_max,
@@ -896,12 +909,13 @@ class ReceiverTests(unittest.TestCase):
     def test_leg_stepper_maps_primitives_to_small_fixed_speeds(self):
         driver = receiver.Driver(self.dog, self.args)
         legs = receiver.LegStepper(driver, {"turn": 20, "forward": 8, "strafe": 6})
-        legs.step("turn", -0.4)
+        legs.step("turn", -1)
         legs.stop()
         legs.step("forward", 1.0)
-        legs.step("strafe", 0.5)
+        legs.step("strafe", 0.5)  # |amount| is a fraction of the primitive's speed
+        legs.step("forward", -0.5)
         self.assertEqual(self.dog.calls, [("turn", -20), ("stop",), ("x", 8),
-                                          ("x", 0), ("y", 6)])
+                                          ("x", 0), ("y", 3), ("x", -4), ("y", 0)])
 
     def test_aligning_owns_the_legs_and_blocks_x_y(self):
         calls = []
@@ -930,12 +944,12 @@ class ReceiverTests(unittest.TestCase):
 
     def test_align_flags(self):
         args = receiver.build_parser().parse_args([])
-        self.assertEqual((args.align_motion, args.recalibrate, args.align_step, args.align_turn,
-                          args.align_walk, args.align_strafe, args.tol_u, args.tol_h, args.tol_v,
-                          args.align_max_steps),
-                         (False, False, 0.3, 20, 8, 6, 0.04, 0.08, 0.05, 40))
+        self.assertEqual((args.align_motion, args.recalibrate, args.align_turn, args.align_walk,
+                          args.tol_u, args.tol_h, args.tol_v, args.align_max_moves,
+                          args.align_max_seconds),
+                         (False, False, 40, 12, 0.04, 0.08, 0.05, 25, 45))
         with patch("sys.stderr", io.StringIO()):
-            for argv in (["--align-turn", "100"], ["--tol-u", "0"], ["--align-step", "2"]):
+            for argv in (["--align-turn", "100"], ["--tol-u", "0"], ["--align-walk", "30"]):
                 with self.assertRaises(SystemExit):
                     receiver.build_parser().parse_args(argv)
 
@@ -1031,6 +1045,7 @@ class ReceiverTests(unittest.TestCase):
         args = receiver.build_parser().parse_args([])
         self.assertEqual((args.color, args.record_fps, args.min_free_mb, args.replay_settle),
                          ("purple", 10, 200, 1.0))
+        self.assertEqual(args.replay_max_gap, 0.5)
         self.assertEqual((args.settle, args.min_sharpness), (0.7, 50))
         self.assertTrue(args.teach_dir.endswith("xgo_teach"))
         with patch("sys.stderr", io.StringIO()):

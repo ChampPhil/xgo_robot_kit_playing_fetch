@@ -146,35 +146,40 @@ Recording refuses to start unless exactly one box of `--color` (default purple) 
 and stops by itself when free disk drops below `--min-free-mb` (200). At 640×480 a minute of
 recording takes roughly 15–20 MB.
 
-## Aligning with the box (hold A)
+## Aligning with the box (hold A, or F = fetch)
 
-Holding **A** steps the robot until the box looks the way it did in the latest recording's
-reference photo, then logs `ALIGNED - release A, then press Y`. Release A to stop at any time.
-Design: `docs/superpowers/specs/2026-10-07-self-calibrating-alignment-design.md`.
+Alignment moves the robot back to where the latest recording's first frame was taken, so the
+recorded pickup can be replayed. Design notes: `docs/superpowers/specs/2026-10-07-self-calibrating-alignment-design.md`
+(revision 2026-10-15).
 
-- **Display-only by default.** Without `--align-motion`, holding A moves nothing; it logs the
-  error (`eu` = sideways, `eh` = size, `ev` = height in the image) and the step it *would* take.
-  Use this first to check the directions on the real robot.
-- **Alignment steers by the camera only** (heading hold is bypassed for its steps).
-- **Calibration (first A hold with `--align-motion`, or `--recalibrate`).** The robot puts the arm
-  and kneel where the reference was taken, then turns a **full 360° in small stop-and-look steps**
-  (the box leaves the view and comes back), then one step forward/back and left/right. That
-  measures how each step moves the box in the image. Saved to `~/xgo_teach/calibration.json` and
-  reused until the step speeds, step time or the recording's arm/kneel change. Keep about half a
-  metre clear around the robot; it takes roughly a minute.
-- **Aligning.** Each step: move briefly, stop, wait `--settle` (0.7 s) for the camera to stop
-  shaking, then look at two sharp frames that agree. It picks the turn, walk or side-step predicted
-  to help most and keeps refining its model from what each step actually did. Aligned = box
-  centre within `--tol-u` (0.04 of the width) and size within `--tol-h` (8%) on 3 looks in a row.
-- **It stops and says why** when: A is released; any stick/LB/RB/kneel input; no commands for
-  0.5 s; the box is missing/ambiguous/at the edge 3 times; the camera stalls; the error grows 3
-  steps in a row; 40 steps or 60 s; or the box is the right size but at a different height
-  ("view mismatch": kneel/arm/floor differ from the recording). A is ignored while recording or
-  replaying, and X/Y are ignored while aligning.
+Measured on the robot (pulse probe, 2026-10-15): a leg command does **nothing for the first
+~0.5 s** (gait start-up), then turns at roughly the commanded speed in deg/s (speed 40 ≈ 32
+deg/s); the camera spans **~94°**; after the program's startup reset the **gyro tracks turns
+with no drift**. Alignment therefore:
 
-Floor only, supervised, within reach. Tuning: `--align-turn` (20), `--align-walk` (8),
-`--align-strafe` (6), `--align-step` (0.3 s), `--align-max-steps` (40). All receiver options,
-including `--color`, can be given to `gamepad_sender.py`, which passes them through.
+- **Turns in one move, on the gyro:** the angle comes from where the box sits in the image
+  (degrees per image width), and the turn stops when the gyro reports it. A failed gyro read
+  stops the turn.
+- **Walks in timed segments** that include the 0.5 s start-up; since apparent size ∝ 1/distance,
+  1/size falls linearly while walking, so the time to the target size is planned from the
+  measured rate. Short final corrections walk at half speed.
+- **Calibrates once** with a single 15° turn toward the box (degrees per image width and which
+  way the gyro counts), saved to `~/xgo_teach/calibration.json`; `--recalibrate` redoes it.
+- **Sees far boxes:** at ~60 cm the purple box is only ~11 px and dark (S≈62, V≈40, hue up to
+  ~175), so alignment uses a wider purple range (H115–178, S≥40, V≥25), a 40 px minimum, and
+  takes a box at least twice the area of any other blob (background specks). The reference
+  photo is re-measured with the same detector so sizes compare like for like.
+- **Display-only by default:** without `--align-motion`, holding A only logs the error and the
+  move it would make.
+- Aligned = box centre within `--tol-u` (0.04 of the width) and size within `--tol-h` (8%) on two
+  looks in a row. It stops and says why on release, any manual input, no commands for 0.5 s, the
+  box lost 3 times, a stalled camera, the error growing 3 moves in a row, `--align-max-moves`
+  (25) or `--align-max-seconds` (45), or "view mismatch" (right size, wrong height in the image).
+
+Tuning: `--align-turn` (40), `--align-walk` (12). Floor only, supervised, within reach.
+
+**Replays are shortened:** pauses longer than `--replay-max-gap` (0.5 s) between recorded moves,
+including the wait before the first move, are cut to 0.5 s (`0` keeps the original timing).
 
 ## Live video
 

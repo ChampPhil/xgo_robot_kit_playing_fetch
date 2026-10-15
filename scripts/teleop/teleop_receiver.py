@@ -148,20 +148,24 @@ def build_parser():
     parser.add_argument("--align-motion", action="store_true",
                         help="let holding A move the robot (otherwise A only reports alignment)")
     parser.add_argument("--recalibrate", action="store_true",
-                        help="redo the alignment calibration (360° turn) on the first A hold")
+                        help="redo the alignment calibration (one short turn) on the next use")
     for flag, default, low, high, help_text in (
-            ("align-step", 0.3, 0.15, 1.0, "seconds per alignment step"),
-            ("align-turn", 20, 5, 60, "turn speed for alignment steps"),
-            ("align-walk", 8, 3, 15, "forward/back speed for alignment steps"),
-            ("align-strafe", 6, 3, 15, "side-step speed for alignment steps"),
+            ("align-turn", 40, 10, 60, "turn speed for alignment (probe: ~0.8 deg/s per unit)"),
+            ("align-walk", 12, 4, 20, "forward/back speed for alignment"),
             ("tol-u", 0.04, 0.01, 0.2, "aligned when the box centre is this close (image width)"),
             ("tol-h", 0.08, 0.02, 0.3, "aligned when the box size is this close (fraction)"),
             ("tol-v", 0.05, 0.01, 0.2, "allowed vertical difference before 'view mismatch'"),
-            ("align-max-steps", 40, 5, 200, "give up after this many alignment steps")):
+            ("align-max-moves", 25, 5, 100, "give up after this many alignment moves"),
+            ("align-max-seconds", 45, 10, 180, "give up after this long aligning")):
         parser.add_argument(
             f"--{flag}", type=lambda v, lo=low, hi=high, name=flag: bounded_number(
                 v, minimum=lo, maximum=hi, label=name),
             default=default, metavar="VALUE", help=f"{help_text} (default: {default})")
+    parser.add_argument(
+        "--replay-max-gap", type=lambda v: bounded_number(v, minimum=0, maximum=10,
+                                                          label="replay-max-gap"),
+        default=0.5, metavar="SECONDS",
+        help="shorten pauses in a replay to at most this (0 = original timing; default: 0.5)")
     parser.add_argument(
         "--replay-settle", type=lambda v: bounded_number(v, minimum=0, maximum=5,
                                                          label="replay-settle"),
@@ -471,8 +475,10 @@ class LegStepper:
         self.speeds = speeds
 
     def step(self, primitive, amount):
+        """Move with `primitive` at |amount| (0..1] of its speed; the sign gives the direction."""
         steps = dict.fromkeys(AXES, 0)
-        steps[self.AXIS[primitive]] = int(round(math.copysign(self.speeds[primitive], amount)))
+        speed = self.speeds[primitive] * min(1.0, abs(amount))
+        steps[self.AXIS[primitive]] = int(round(math.copysign(max(1.0, speed), amount)))
         self.driver.apply(steps)
 
     def stop(self):
@@ -635,6 +641,47 @@ class Fetcher:
 def alignment_legs_driver(driver):
     """Alignment steers by the camera; keep heading-hold corrections out of its steps."""
     return getattr(driver, "inner", driver)
+
+
+# Far away under room lighting the purple box measures S~62, V~40 and hue up to ~175, outside
+# the recording's purple range; alignment uses a wider range plus a 40 px minimum, and takes a
+# clearly dominant box over small background specks.
+ALIGN_PURPLE = ((115, 40, 25), (178, 255, 255))
+ALIGN_MIN_AREA = 40
+ALIGN_DOMINANT = 2.0
+
+
+def alignment_measure(color):
+    """frame -> (features, reason) with the alignment detector."""
+    import teach as teach_module  # puts box_detection on sys.path
+    from detect_boxes import HSV_RANGES, detect_boxes
+
+    ranges = dict(HSV_RANGES, purple=ALIGN_PURPLE)
+
+    def measure(frame):
+        found = detect_boxes(frame, min_area=ALIGN_MIN_AREA, ranges=ranges)
+        return teach_module.box_features(found, color, frame.shape, dominant=ALIGN_DOMINANT)
+
+    return measure
+
+
+def alignment_reference(load, measure):
+    """The latest reference, re-measured from its photo with the alignment detector so sizes
+    are compared like for like (falls back to the stored features)."""
+    def reference():
+        found = load()
+        if found is None:
+            return None
+        try:
+            import cv2  # type: ignore[import-not-found]
+
+            image = cv2.imread(str(found.get("image")))
+            features, _ = measure(image) if image is not None else (None, None)
+        except Exception:
+            features = None
+        return dict(found, features=features or found["features"])
+
+    return reference
 
 
 class PosePreparer:
@@ -866,7 +913,7 @@ def main(argv=None):
         arm.listener = posture.listener = driver.listener = recorder.on_send
         controller = teach_module.TeachController(
             cam, recorder, teach_module.Replayer(arm, posture, settle=args.replay_settle,
-                                                 driver=driver),
+                                                 driver=driver, max_gap=args.replay_max_gap),
             Path(args.teach_dir).expanduser(), lambda: robot_state(driver, arm, posture), log,
             settle=args.settle)
         viewer = start_viewer(
@@ -876,21 +923,20 @@ def main(argv=None):
         import align as align_module
 
         teach_dir = Path(args.teach_dir).expanduser()
-        speeds = {"turn": args.align_turn, "forward": args.align_walk, "strafe": args.align_strafe}
-        aligner = align_module.Aligner(
+        speeds = {"turn": int(args.align_turn), "forward": int(args.align_walk)}
+        measure = alignment_measure(args.color)
+        aligner = align_module.GyroAligner(
             legs=LegStepper(alignment_legs_driver(driver), speeds),
             pose=PosePreparer(arm, posture),
-            observer=align_module.Observer(
-                cam, lambda frame: teach_module.box_features(detect_boxes(frame), args.color,
-                                                             frame.shape),
-                teach_module.laplacian_sharpness, time.monotonic,
-                min_sharpness=args.min_sharpness),
-            reference=lambda: teach_module.load_reference(teach_dir),
+            observer=align_module.Observer(cam, measure, teach_module.laplacian_sharpness,
+                                           time.monotonic, min_sharpness=args.min_sharpness),
+            read_yaw=heading.make_yaw_reader(dog.ser),
+            reference=alignment_reference(lambda: teach_module.load_reference(teach_dir),
+                                          measure),
             calibration_path=teach_dir / "calibration.json", log=log, clock=time.monotonic,
             motion=args.align_motion, recalibrate=args.recalibrate, settle=args.settle,
-            step_seconds=args.align_step, speeds=speeds,
-            tol={"u": args.tol_u, "h": args.tol_h, "v": args.tol_v},
-            max_steps=int(args.align_max_steps))
+            speeds=speeds, tol={"u": args.tol_u, "h": args.tol_h, "v": args.tol_v},
+            max_seconds=args.align_max_seconds, max_moves=int(args.align_max_moves))
         fullreset = FullReset(dog, driver, arm, posture, ramp, log)
         fetcher = Fetcher(fullreset, aligner, controller, log, time.monotonic,
                           motion=args.align_motion)

@@ -33,8 +33,8 @@ AXIS_MAX = 32767
 RECEIVER_FLAGS = ("max-x", "max-y", "max-turn", "ramp", "ramp-start", "arm-speed", "claw-speed",
                   "arm-home-x", "arm-home-z", "claw-start", "kneel-pitch", "kneel-height",
                   "stand-height", "kneel-time", "color", "settle", "min-sharpness", "record-fps",
-                  "min-free-mb", "replay-settle", "align-step", "align-turn", "align-walk",
-                  "align-strafe", "tol-u", "tol-h", "tol-v", "align-max-steps",
+                  "min-free-mb", "replay-settle", "replay-max-gap", "align-turn", "align-walk",
+                  "tol-u", "tol-h", "tol-v", "align-max-moves", "align-max-seconds",
                   "heading-gain", "heading-max", "heading-sign")
 RECEIVER_SWITCHES = ("align-motion", "recalibrate", "no-heading-hold", "start-standing")
 

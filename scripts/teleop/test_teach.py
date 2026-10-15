@@ -409,6 +409,18 @@ class ReplayTests(unittest.TestCase):
             (self.root / "badwalk" / "motion.json").unlink()
             (self.root / "badwalk").rmdir()
 
+    def test_long_pauses_are_shortened(self):
+        motion = dict(MOTION, events=[{"t": 5.3, "arm": [90, 20]}, {"t": 5.4, "arm": [91, 20]},
+                                      {"t": 9.0, "claw": 200}, {"t": 9.1, "claw": 210}])
+        replayer = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=0,
+                                  max_gap=0.5)
+        replayer.start(motion)
+        self.assertEqual([round(e["t"], 3) for e in replayer.events], [0.5, 0.6, 1.1, 1.2])
+        self.assertAlmostEqual(replayer.duration, 1.2)
+        original = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=0, max_gap=0)
+        original.start(motion)
+        self.assertEqual([e["t"] for e in original.events], [5.3, 5.4, 9.0, 9.1])
+
     def test_replay_skips_unknown_start_pose_and_abort_stops(self):
         self.replayer.start(dict(MOTION, start={"arm": None, "claw": None, "kneel": 0.0}))
         self.assertEqual(self.arm.calls, [("kneel", 0.0)])
