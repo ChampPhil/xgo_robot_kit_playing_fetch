@@ -17,6 +17,7 @@ import json
 import math
 from datetime import datetime
 
+from heading import angle_diff  # noqa: F401  (also used by callers as align.angle_diff)
 from teach import write_json_atomic
 
 CALIBRATION_VERSION = 2
@@ -31,10 +32,6 @@ def errors(features, reference):
 def within(error, tol):
     """True when the driven errors (eu, eh) are inside tolerance; ev is checked separately."""
     return abs(error[0]) <= tol["u"] and abs(error[1]) <= tol["h"]
-
-
-def angle_diff(a, b):
-    return (a - b + 180.0) % 360.0 - 180.0
 
 
 def walk_seconds(h, h_target, rate):
@@ -445,3 +442,49 @@ class GyroAligner:
             amount = self.FINE_AMOUNT
             seconds /= amount
         return direction, max(self.MIN_WALK, min(self.MAX_WALK, seconds)), amount
+
+
+def alignment_legs_driver(driver):
+    """Alignment steers by the camera; keep heading-hold corrections out of its steps."""
+    return getattr(driver, "inner", driver)
+
+
+# Far away under room lighting the purple box measures S~62, V~40 and hue up to ~175, outside
+# the recording's purple range; alignment uses a wider range plus a 40 px minimum, and takes a
+# clearly dominant box over small background specks.
+ALIGN_PURPLE = ((115, 40, 25), (178, 255, 255))
+ALIGN_MIN_AREA = 40
+ALIGN_DOMINANT = 2.0
+
+
+def alignment_measure(color):
+    """frame -> (features, reason) with the alignment detector."""
+    import teach as teach_module  # puts box_detection on sys.path
+    from detect_boxes import HSV_RANGES, detect_boxes
+
+    ranges = dict(HSV_RANGES, purple=ALIGN_PURPLE)
+
+    def measure(frame):
+        found = detect_boxes(frame, min_area=ALIGN_MIN_AREA, ranges=ranges)
+        return teach_module.box_features(found, color, frame.shape, dominant=ALIGN_DOMINANT)
+
+    return measure
+
+
+def alignment_reference(load, measure):
+    """The latest reference, re-measured from its photo with the alignment detector so sizes
+    are compared like for like (falls back to the stored features)."""
+    def reference():
+        found = load()
+        if found is None:
+            return None
+        try:
+            import cv2  # type: ignore[import-not-found]
+
+            image = cv2.imread(str(found.get("image")))
+            features, _ = measure(image) if image is not None else (None, None)
+        except Exception:
+            features = None
+        return dict(found, features=features or found["features"])
+
+    return reference

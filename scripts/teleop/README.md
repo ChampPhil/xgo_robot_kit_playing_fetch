@@ -75,7 +75,7 @@ Arm keys take over from walk keys (walking stops while the arm moves), like RB o
 
 One press does the whole job: **full reset** (claw open, fully kneeled, arm back to its default,
 so the camera sees exactly what it saw for the reference photo), 1.5 s to settle, **align by
-itself** with the latest recording's start view (calibrating with the 360° turn the first time),
+itself** with the latest recording's start view (calibrating with one 15° turn the first time),
 then **replay the recorded pickup** once aligned. Nothing needs to be held. **F again, any
 movement key, Esc, Ctrl+C in the terminal, or a lost connection cancels** it and stops the legs.
 Clicking away from the keyboard window does *not* cancel a fetch (it only releases held keys);
@@ -106,7 +106,7 @@ for, not the corrections, so nothing is applied twice).
   corrected. After starting, **stand still for about 2.5 s** before walking; until then it says
   "stand still for 2 s" and doesn't correct.
 - **First use:** it does nothing until it has seen one real turn (Q/E, the turn stick, or the
-  alignment calibration's 360° turn), from which it learns which way the gyro counts. That is
+  alignment's calibration turn), from which it learns which way the gyro counts. That is
   saved to `~/xgo_teach/heading.json`; `--heading-sign 1|-1` overrides it.
 - **Safety:** yaw is read with the logger's validated protocol (50 ms timeout); a failed read
   means *no* correction (xgolib's `read_yaw()` would wait 1 s and return 0, which looks like a
@@ -196,6 +196,21 @@ serves video on the robot's loopback (`127.0.0.1:8090`) and the sender forwards 
 SSH session (`ssh -L 8090:127.0.0.1:8090`); nobody else on the network can view it. It shares
 the camera with recording. The old camera stream (`test_xgo_connectivity`) must not be running.
 If port 8090 is busy on this computer, SSH prints a warning and driving still works.
+
+## Code map
+
+| File | Runs on | Job |
+| --- | --- | --- |
+| `gamepad_sender.py` | Mac | Reads the gamepad (or `--keyboard`), sends one JSON command per tick over SSH, opens the video tunnel |
+| `keyboard_input.py` | Mac | The keyboard window: key → controller state, the side-by-side video panel |
+| `teleop_receiver.py` | Robot | Flags, startup (reset, battery check, kneel), the 20 Hz loop that routes each command, shutdown |
+| `protocol.py` | Robot | The command format (`Message`, `parse_message`) and value checks |
+| `body.py` | Robot | Legs (`Driver`, `Ramp`, `LegStepper`), arm and claw with the measured reach ring (`ArmController`), kneel (`Posture`) |
+| `actions.py` | Robot | Buttons: bark, reset claw (BACK/C), full reset (RT/Z), fetch (F) |
+| `heading.py` | Robot | Gyro reader and heading hold |
+| `teach.py` | Robot | Recording (X), replay (Y), reference photo |
+| `align.py` | Robot | Alignment (A / fetch): observer, gyro turns, walk segments, its detector settings |
+| `camera.py`, `video.py` | Robot | Background camera reader; live MJPEG stream with the red target box |
 
 ## Setup (computer side only)
 
