@@ -37,7 +37,7 @@ __all__ = ["ARM_AXES", "ARM_LIMITS", "ARM_REACH", "AXES", "ArmController", "BARK
            "Driver", "EOF", "Fetcher", "FullReset", "LIMITS", "LegStepper", "Message",
            "PosePreparer", "Posture", "Ramp", "ResetButton", "alignment_legs_driver",
            "alignment_measure", "alignment_reference", "bounded_number", "build_parser",
-           "latest", "main", "parse_message", "read_lines", "robot_state", "run", "scale",
+           "latest", "main", "make_log", "parse_message", "read_lines", "robot_state", "run", "scale",
            "start_viewer"]
 
 EOF = object()
@@ -286,6 +286,32 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                 posture.stand()
 
 
+def make_log(stream, path, now=None, max_bytes=2_000_000):
+    """Print to the terminal (stderr; stdout stays unused) and append timestamped lines to a
+    session log file on the robot, so runs can be read afterwards over SSH. The file rotates
+    to <name>.1 above max_bytes; file errors (e.g. a full disk) never stop the program."""
+    now = now or (lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
+    handle = None
+    try:
+        path = Path(path)
+        if path.exists() and path.stat().st_size > max_bytes:
+            path.replace(path.with_name(path.name + ".1"))
+        handle = open(path, "a")
+    except OSError:
+        pass
+
+    def log(text):
+        print(text, file=stream, flush=True)
+        if handle is not None:
+            try:
+                handle.write(f"{now()} {text}\n")
+                handle.flush()
+            except OSError:
+                pass
+
+    return log
+
+
 def start_viewer(cam, port, log, reference=None):
     """Serve live video on the robot's loopback only; the sender reaches it via an SSH tunnel
     (the tailnet allows SSH to the robot but not other ports)."""
@@ -305,7 +331,13 @@ def start_viewer(cam, port, log, reference=None):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    log = lambda text: print(text, file=sys.stderr, flush=True)  # noqa: E731 - stdout stays unused
+    teach_dir = Path(args.teach_dir).expanduser()
+    try:
+        teach_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    log = make_log(sys.stderr, teach_dir / "session.log")
+    log(f"--- session start: {' '.join(sys.argv[1:]) or '(defaults)'}")
     try:
         from stream_sensors import require_free_port
         require_free_port(args.port)

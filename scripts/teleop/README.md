@@ -197,6 +197,13 @@ SSH session (`ssh -L 8090:127.0.0.1:8090`); nobody else on the network can view 
 the camera with recording. The old camera stream (`test_xgo_connectivity`) must not be running.
 If port 8090 is busy on this computer, SSH prints a warning and driving still works.
 
+## Session log
+
+Everything the robot program prints is also appended, timestamped, to
+`~/xgo_teach/session.log` on the robot (rotated to `session.log.1` above 2 MB), so a run —
+e.g. why a fetch stopped — can be read afterwards over SSH:
+`ssh pi@100.74.30.90 tail -50 xgo_teach/session.log`.
+
 ## Code map
 
 | File | Runs on | Job |

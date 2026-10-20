@@ -883,6 +883,28 @@ class ReceiverTests(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertEqual(features["bbox"][:2], [300, 200])
 
+    def test_session_log_goes_to_the_terminal_and_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.log"
+            terminal = io.StringIO()
+            log = receiver.make_log(terminal, path, now=lambda: "2026-10-20 12:00:00")
+            log("ALIGN 1: eu=+0.10 eh=-0.62 -> turn right 9 deg")
+            log("ALIGNED")
+            self.assertEqual(terminal.getvalue().splitlines(),
+                             ["ALIGN 1: eu=+0.10 eh=-0.62 -> turn right 9 deg", "ALIGNED"])
+            self.assertEqual(path.read_text().splitlines()[-1], "2026-10-20 12:00:00 ALIGNED")
+
+    def test_session_log_rotates_and_survives_a_full_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.log"
+            path.write_text("x" * 3_000_000)
+            log = receiver.make_log(io.StringIO(), path, max_bytes=2_000_000)
+            log("new session")
+            self.assertTrue((Path(tmp) / "session.log.1").exists())
+            self.assertEqual(path.read_text().split(" ", 2)[-1], "new session\n")
+            broken = receiver.make_log(io.StringIO(), Path(tmp) / "missing-dir" / "x" / "log")
+            broken("still prints to the terminal")  # file errors never stop the robot program
+
     def test_heading_flags(self):
         args = receiver.build_parser().parse_args([])
         self.assertEqual((args.no_heading_hold, args.heading_gain, args.heading_max,
