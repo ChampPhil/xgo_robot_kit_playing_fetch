@@ -894,9 +894,18 @@ class ReceiverTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     receiver.build_parser().parse_args(argv)
 
+    def test_run_tells_heading_hold_when_alignment_moves_the_legs(self):
+        seen = []
+        self.driver.refresh = lambda external_motion=False: seen.append(external_motion)
+        aligner = SimpleNamespace(update=lambda held, manual: held, watchdog=lambda: None)
+        receiver.run(self.driver, Paced(line(enable=False), line(enable=False, align=True),
+                                        receiver.EOF),
+                     0.5, self.log.append, aligner=aligner)
+        self.assertEqual(seen, [False, True])
+
     def test_run_refreshes_the_heading_correction_every_tick(self):
         refreshes = []
-        self.driver.refresh = lambda: refreshes.append(1)
+        self.driver.refresh = lambda external_motion=False: refreshes.append(1)
         receiver.run(self.driver, Paced(line(enable=False), line(enable=False), receiver.EOF),
                      0.5, self.log.append)
         self.assertEqual(len(refreshes), 2)

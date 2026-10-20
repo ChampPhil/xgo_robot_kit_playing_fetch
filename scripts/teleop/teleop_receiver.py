@@ -268,7 +268,9 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
             if posture is not None and not replaying:
                 posture.update(kneel)
             if hasattr(driver, "refresh"):
-                driver.refresh()  # keep correcting walking drift, including replayed walks
+                # keep correcting walking drift (also replayed walks); alignment moves the legs
+                # itself, so its turns must not be measured as gyro drift
+                driver.refresh(external_motion=aligning)
     finally:
         driver.stop()
         try:

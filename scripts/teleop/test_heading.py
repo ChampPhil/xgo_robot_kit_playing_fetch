@@ -293,6 +293,20 @@ class HeadingDriverTests(unittest.TestCase):
         self.driver.refresh()  # every loop tick
         self.assertEqual(self.inner.calls[-1], {"x": 12, "y": 0, "yaw": 10})
 
+    def test_motion_it_did_not_command_is_never_measured_as_drift(self):
+        hold = heading.HeadingHold(self.gyro.read, self.clock, log=lambda text: None, sign=1)
+        driver = heading.HeadingDriver(self.inner, hold)
+        for _ in range(30):  # 1.5 s still: drift sampling under way
+            self.clock.now += 0.05
+            driver.refresh()
+        self.assertTrue(hold.still_samples)
+        for _ in range(60):  # alignment turns the robot through the inner driver for 3 s
+            self.clock.now += 0.05
+            self.gyro.yaw += 1.6  # ~32 deg/s
+            driver.refresh(external_motion=True)
+        self.assertIsNone(hold.bias)  # the turn was not taken for drift
+        self.assertEqual(len(hold.still_samples), 0)
+
     def test_stop_stops_and_resets(self):
         self.driver.apply(STRAIGHT)
         self.driver.stop()

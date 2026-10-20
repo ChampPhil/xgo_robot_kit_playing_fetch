@@ -259,9 +259,16 @@ class HeadingDriver:
                 self.listener("walk", dict(steps))
         self.inner.apply(self.hold.adjust(steps))
 
-    def refresh(self):
+    def refresh(self, external_motion=False):
         """Called every loop tick: keeps a walk that is not re-sent (replay) corrected, and
-        measures the gyro's drift while the legs are stopped."""
+        measures the gyro's drift while the legs are stopped.
+
+        external_motion: something else (alignment) is moving the legs through the inner
+        driver; its turns must not be mistaken for gyro drift.
+        """
+        if external_motion:
+            self.hold.moving()
+            return
         if any(self.current.values()):
             self.inner.apply(self.hold.adjust(self.current))
         else:
