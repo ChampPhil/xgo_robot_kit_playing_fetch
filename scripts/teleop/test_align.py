@@ -31,7 +31,8 @@ class GyroSim:
     """A robot on a floor with one box. Legs, camera and gyro interfaces for the aligner."""
 
     def __init__(self, clock, bearing=20.0, distance=0.6, gyro_sign=1, walk_per_speed=0.0042,
-                 legs_sign=1, gyro_drift=0.0, coast=0.0, walk_dead=DEAD, hidden_above_h=None):
+                 legs_sign=1, gyro_drift=0.0, coast=0.0, walk_dead=DEAD, hidden_above_h=None,
+                 clipped_above_h=None, visible=None):
         self.clock = clock
         self.x = self.y = 0.0
         self.psi = 0.0  # heading, degrees, counter-clockwise positive
@@ -47,6 +48,9 @@ class GyroSim:
         self.walk_dead = walk_dead  # walking from a kneel starts slower than turning
         self.hidden_above_h = hidden_above_h  # closer than this the box is under the head
         self.closest = 1.0
+        self.clipped_above_h = clipped_above_h  # closer: cut off by the bottom of the image
+        self.visible = visible  # (kneel, distance) -> whether the camera can see the box
+        self.kneel = 1.0
 
     # --- legs -----------------------------------------------------------------------------
     def step(self, primitive, amount):
@@ -97,6 +101,10 @@ class GyroSim:
         h = K / distance
         if self.hidden_above_h is not None and h > self.hidden_above_h:
             return None
+        if self.visible is not None and not self.visible(self.kneel, distance):
+            return None
+        if self.clipped_above_h is not None and h > self.clipped_above_h:
+            return {"clipped": True}
         return {"u": 0.5 + right / FOV, "v": 0.56 + h, "h": h}
 
     def latest(self):
@@ -109,15 +117,20 @@ class GyroSim:
 
 
 def measure(frame):
+    if frame["features"] and frame["features"].get("clipped"):
+        return None, align.TOO_CLOSE
     return (frame["features"], None) if frame["features"] else (None, "no purple box in view")
 
 
 class Pose:
-    def __init__(self):
+    def __init__(self, robot=None):
         self.calls = []
+        self.robot = robot
 
     def prepare(self, kneel, arm):
         self.calls.append((kneel, arm))
+        if self.robot is not None:
+            self.robot.kneel = kneel
 
 
 CALIBRATION = {"version": 2, "deg_per_u": 94.0, "gyro_sign": 1, "speeds": SPEEDS,
@@ -129,7 +142,7 @@ class Harness(unittest.TestCase):
              drift=0.0, **sim):
         self.clock = Clock()
         self.robot = GyroSim(self.clock, **sim)
-        self.pose = Pose()
+        self.pose = Pose(self.robot)
         self.log = []
         if cal_dir is None:
             tmp = tempfile.TemporaryDirectory()
@@ -399,6 +412,33 @@ class GyroAlignerTests(Harness):
         self.run_until(60)
         self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
         self.assertTrue(self.said("backing up"), self.log)
+
+    def test_box_cut_off_at_the_bottom_at_the_start_means_back_up(self):
+        # measured 2026-10-21: kneeling just too close, the box is a strip at the bottom edge
+        self.make(bearing=0.0, distance=K / 0.36, clipped_above_h=0.3)
+        self.calibrated()
+        self.run_until(60)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertTrue(self.said("too close"), self.log)
+
+    def test_far_box_seen_only_standing_is_approached_then_aligned_kneeling(self):
+        # kneeling the camera looks down at the near floor; standing it sees farther
+        self.make(bearing=8.0, distance=0.6,
+                  visible=lambda kneel, d: d < 0.3 if kneel > 0.7 else d > 0.12)
+        self.calibrated()
+        self.run_until(120)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertTrue(self.said("SEARCH"), self.log)
+        self.assertTrue(any(kneel < 1.0 for kneel, _ in self.pose.calls), self.pose.calls)
+        self.assertEqual(self.pose.calls[-1][0], 1.0)  # aligned in the recording's pose
+
+    def test_box_in_no_posture_stops_after_trying_them(self):
+        self.make(visible=lambda kneel, d: False)
+        self.calibrated()
+        self.run_until(30)
+        self.assertFalse(self.aligner.active)
+        self.assertEqual([kneel for kneel, _ in self.pose.calls], [1.0, 0.5, 0.0])
+        self.assertTrue(self.said("any posture"), self.log)
 
     def test_legs_going_the_wrong_way_are_stopped(self):
         self.make(legs_sign=-1)

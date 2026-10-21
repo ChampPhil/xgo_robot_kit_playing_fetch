@@ -133,6 +133,10 @@ class GyroAligner:
     MAX_WALK_DEAD = 2.5  # seconds; a walk that has not started by then is a fault
     NO_MOTION = 0.03  # a walk that changed the box height by less than this did not start
     MAX_BACKUPS = 3  # times the box may be lost to an overshoot before giving up
+    KNEEL_LEVELS = (0.0, 0.5, 1.0)  # postures tried when the box is not in view
+    MAX_SEARCH_MOVES = 8
+    SEARCH_WALK = 1.5  # seconds toward a box only another posture can see
+    SEARCH_CENTER = 0.1  # turn toward it first when it is this far off the target column
 
     def __init__(self, legs, pose, observer, read_yaw, reference, calibration_path, log, clock,
                  motion=False, recalibrate=False, settle=0.7, speeds=None, tol=None,
@@ -220,6 +224,7 @@ class GyroAligner:
         # 2026-10-21): learned upwards when a walk leaves the box's size unchanged.
         self.walk_dead = self.DEAD
         self.backups, self.max_forward = 0, None
+        self.search_levels, self.search_moves = None, 0
         self.phase = "initial"
         if self.motion:
             self.pose.prepare(state.get("kneel", 0.0), state.get("arm"))
@@ -303,6 +308,9 @@ class GyroAligner:
             self.legs.stop()
             self.moving = None
             self.observer.begin(now + self.settle)
+        if self.phase == "search_moved":
+            self.return_to_pose(now)
+            return
         result = self.observer.poll()
         if result is None:
             return
@@ -319,7 +327,10 @@ class GyroAligner:
             self.on_display(status, value, now)
             return
         if status == "lost":
-            self.abort(f"box not in view at the start ({value})")
+            if value == TOO_CLOSE:
+                self.back_up(1.0, 1.0, now)
+            else:
+                self.search(now)
             return
         reason = self.implausible(value)
         if reason:
@@ -344,6 +355,55 @@ class GyroAligner:
             return
         self.phase, self.align_started = "align", now
         self.on_align(status, value, now)
+
+    # --- looking from other postures ----------------------------------------------------------
+    def search(self, now):
+        """Not in view in the recording's posture: kneeling the camera looks down at the near
+        floor, standing it sees farther. Try the other kneel levels, nearest first."""
+        kneel = self.setup["kneel"] or 0.0
+        if self.search_levels is None:
+            self.search_levels = sorted((level for level in self.KNEEL_LEVELS
+                                         if abs(level - kneel) > 1e-3),
+                                        key=lambda level: abs(level - kneel))
+        if not self.search_levels:
+            self.abort("box not in view in any posture")
+            return
+        level = self.search_levels.pop(0)
+        self.log("SEARCH: no box in view; looking from kneel {:.1f}...".format(level))
+        self.pose.prepare(level, self.setup["arm"])
+        self.phase = "search"
+        self.observer.begin(now + self.prepare_settle)
+
+    def on_search(self, status, value, now):
+        if status == "lost" and value == TOO_CLOSE:
+            self.return_to_pose(now)  # close: the recording's posture handles it
+            return
+        if status == "lost" or self.implausible(value):
+            self.search(now)
+            return
+        self.search_moves += 1
+        if self.search_moves > self.MAX_SEARCH_MOVES:
+            self.abort("box only seen from another posture after {} moves".format(
+                self.MAX_SEARCH_MOVES))
+            return
+        eu = value["u"] - self.ref["u"]
+        self.phase = "search_moved"
+        if abs(eu) > self.SEARCH_CENTER:
+            deg_per_u = self.calibration["deg_per_u"] if self.calibration else 95.0
+            degrees = -eu * deg_per_u
+            self.log("SEARCH: box seen (u={:.2f}); turn {} {:.0f} deg".format(
+                value["u"], "left" if degrees > 0 else "right", abs(degrees)))
+            self.start_turn(degrees, now)
+        else:
+            self.log("SEARCH: box seen ahead; walk forward {:.1f} s".format(self.SEARCH_WALK))
+            self.start_walk(1, self.SEARCH_WALK, 1.0, now)
+        self.last_move = None  # not comparable with the recording's posture: nothing to learn
+
+    def return_to_pose(self, now):
+        self.pose.prepare(self.setup["kneel"] or 0.0, self.setup["arm"])
+        self.search_levels = None
+        self.phase = "initial"
+        self.observer.begin(now + self.prepare_settle)
 
     def implausible(self, value):
         if value["h"] > self.TOO_BIG * self.ref["h"]:
@@ -439,28 +499,35 @@ class GyroAligner:
             self.walk_dead))
         return True
 
-    def overshot(self, now):
-        """Lost right after walking forward: the box is under the camera. Back up as far."""
-        if self.last_move is None or self.last_move[:2] != ("walk", 1):
+    def overshot(self, reason, now):
+        """Cut off at the bottom, or lost right after walking forward: the box is under the
+        camera. Back up (as far as that walk went)."""
+        forward = self.last_move is not None and self.last_move[:2] == ("walk", 1)
+        if not forward and reason != TOO_CLOSE:
             return False
         if self.backups >= self.MAX_BACKUPS:
             return False
-        self.backups += 1
-        walked = self.walk["seconds"] * self.walk["amount"]
-        self.max_forward = 0.5 * walked  # creep in from here
-        self.log("ALIGN: lost the box right after walking forward; too close - backing up "
-                 "{:.1f} s.".format(self.walk["seconds"]))
-        self.lost = 0
-        self.start_walk(-1, self.walk["seconds"], self.walk["amount"], now)
-        self.last_move = ("backup", -1, self.walk["seconds"])
+        seconds, amount = (self.walk["seconds"], self.walk["amount"]) if forward else (1.0, 1.0)
+        self.max_forward = 0.5 * seconds * amount  # creep in from here
+        self.back_up(seconds, amount, now)
         return True
+
+    def back_up(self, seconds, amount, now):
+        if self.backups >= self.MAX_BACKUPS:
+            self.abort("still too close after backing up {} times".format(self.backups))
+            return
+        self.backups += 1
+        self.log("ALIGN: box too close (under the camera) - backing up {:.1f} s.".format(seconds))
+        self.lost = 0
+        self.start_walk(-1, seconds, amount, now)
+        self.last_move = ("backup", -1, seconds)
 
     def on_align(self, status, value, now):
         if now - self.align_started > self.max_seconds:
             self.abort(f"not aligned after {self.max_seconds:.0f} s")
             return
         if status == "lost":
-            if self.overshot(now):
+            if self.overshot(value, now):
                 return
             self.lost += 1
             if self.lost >= 3:
@@ -555,6 +622,10 @@ def alignment_legs_driver(driver):
 # >= 115 in the dim recording, up to ~175 far away. 105 overlaps light-blue (85-110), fine for
 # a single-box fetch; 170 stops short of red (170-179 and 0-10).
 ALIGN_PURPLE = ((105, 40, 25), (170, 255, 255))
+# Kneeling just too close, the box is a wide strip cut off by the bottom edge, which the
+# detector's shape filter drops (125x45 px measured 2026-10-21): report it as too close.
+TOO_CLOSE = "box cut off at the bottom of the view (too close)"
+ALIGN_CLIPPED_AREA = 800
 ALIGN_MIN_AREA = 40
 ALIGN_DOMINANT = 2.0
 # The box sits on the floor, so it is seen below the horizon (mid-image or lower with the
@@ -574,9 +645,29 @@ def alignment_measure(color):
         found = detect_boxes(frame, min_area=ALIGN_MIN_AREA, ranges=ranges)
         floor = ALIGN_FLOOR_FROM * frame.shape[0]
         found[color] = [c for c in found.get(color, []) if c["bbox"][1] + c["bbox"][3] > floor]
-        return teach_module.box_features(found, color, frame.shape, dominant=ALIGN_DOMINANT)
+        features, reason = teach_module.box_features(found, color, frame.shape,
+                                                     dominant=ALIGN_DOMINANT)
+        if features is None and cut_off_at_bottom(frame, ranges[color]):
+            return None, TOO_CLOSE
+        return features, reason
 
     return measure
+
+
+def cut_off_at_bottom(frame, hsv_range):
+    """A large blob of the colour touching the bottom edge of the image."""
+    import cv2  # type: ignore[import-not-found]
+    import numpy as np
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array(hsv_range[0]), np.array(hsv_range[1]))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    height = frame.shape[0]
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if y + h >= height - 2 and cv2.contourArea(contour) >= ALIGN_CLIPPED_AREA:
+            return True
+    return False
 
 
 def alignment_reference(load, measure):

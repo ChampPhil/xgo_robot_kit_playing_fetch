@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import gamepad_sender as sender
+import align
 import teleop_receiver as receiver
 
 
@@ -911,6 +912,17 @@ class ReceiverTests(unittest.TestCase):
         features, reason = receiver.alignment_measure("purple")(frame)
         self.assertIsNone(reason)
         self.assertEqual(features["bbox"][:2], [370, 290])
+
+    def test_alignment_says_too_close_for_a_box_cut_off_at_the_bottom(self):
+        import cv2
+        import numpy as np
+
+        hsv = np.full((480, 640, 3), (96, 21, 106), dtype=np.uint8)
+        cv2.rectangle(hsv, (300, 435), (425, 479), (115, 240, 69), -1)  # measured 2026-10-21
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        features, reason = receiver.alignment_measure("purple")(frame)
+        self.assertIsNone(features)
+        self.assertEqual(reason, align.TOO_CLOSE)
 
     def test_alignment_ignores_red(self):
         import cv2
