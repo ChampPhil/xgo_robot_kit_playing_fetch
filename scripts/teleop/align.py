@@ -130,6 +130,9 @@ class GyroAligner:
     TURN_RATE = 0.8  # deg/s per unit of turn speed (probe), only for turn deadlines
     DRIFT_WAIT = 6.0  # seconds to wait for heading hold's drift estimate before giving up
     TOO_BIG = 2.5  # a "box" this many times the reference height is something else
+    MAX_WALK_DEAD = 2.5  # seconds; a walk that has not started by then is a fault
+    NO_MOTION = 0.03  # a walk that changed the box height by less than this did not start
+    MAX_BACKUPS = 3  # times the box may be lost to an overshoot before giving up
 
     def __init__(self, legs, pose, observer, read_yaw, reference, calibration_path, log, clock,
                  motion=False, recalibrate=False, settle=0.7, speeds=None, tol=None,
@@ -213,6 +216,10 @@ class GyroAligner:
         self.prev_norm, self.grow, self.in_tol, self.lost = None, 0, 0, 0
         self.last_move, self.last_display = None, None
         self.drift_wait = None
+        # Walking from a kneel starts later than turning (a 1.0 s walk did not move at all,
+        # 2026-10-21): learned upwards when a walk leaves the box's size unchanged.
+        self.walk_dead = self.DEAD
+        self.backups, self.max_forward = 0, None
         self.phase = "initial"
         if self.motion:
             self.pose.prepare(state.get("kneel", 0.0), state.get("arm"))
@@ -279,7 +286,7 @@ class GyroAligner:
 
     def start_walk(self, direction, seconds, amount, now):
         self.legs.step("forward", direction * amount)
-        self.walk = {"until": now + self.DEAD + seconds, "seconds": seconds,
+        self.walk = {"until": now + self.walk_dead + seconds, "seconds": seconds,
                      "direction": direction, "amount": amount}
         self.moving = "walk"
         self.last_move = ("walk", direction, seconds)
@@ -411,15 +418,50 @@ class GyroAligner:
         elif self.last_move[0] == "walk":
             walked = self.walk["seconds"] * self.walk["amount"]
             change = (1.0 / self.previous["h"] - 1.0 / value["h"]) * self.walk["direction"]
+            expected = (self.walk_rate or 0.0) * walked
+            relative = abs(value["h"] - self.previous["h"]) / self.previous["h"]
+            if relative < self.NO_MOTION or change < 0.25 * expected:
+                return self.walk_did_not_start()
             rate = change / walked
             if rate > 0:
                 self.walk_rate = rate if self.walk_rate is None else 0.5 * (self.walk_rate + rate)
+        return True
+
+    def walk_did_not_start(self):
+        """The legs were stopped before the gait got going: wait longer from now on. Too long
+        a wait only undershoots (the next look corrects); too short overshoots."""
+        if self.walk_dead >= self.MAX_WALK_DEAD:
+            self.abort("walking did not move the box (do the legs walk?)")
+            return False
+        commanded = self.walk_dead + self.walk["seconds"]  # the start-up is at least this
+        self.walk_dead = min(self.MAX_WALK_DEAD, commanded + 0.25)
+        self.log("ALIGN: that walk did not start; allowing {:.1f} s of start-up now.".format(
+            self.walk_dead))
+        return True
+
+    def overshot(self, now):
+        """Lost right after walking forward: the box is under the camera. Back up as far."""
+        if self.last_move is None or self.last_move[:2] != ("walk", 1):
+            return False
+        if self.backups >= self.MAX_BACKUPS:
+            return False
+        self.backups += 1
+        walked = self.walk["seconds"] * self.walk["amount"]
+        self.max_forward = 0.5 * walked  # creep in from here
+        self.log("ALIGN: lost the box right after walking forward; too close - backing up "
+                 "{:.1f} s.".format(self.walk["seconds"]))
+        self.lost = 0
+        self.start_walk(-1, self.walk["seconds"], self.walk["amount"], now)
+        self.last_move = ("backup", -1, self.walk["seconds"])
+        return True
 
     def on_align(self, status, value, now):
         if now - self.align_started > self.max_seconds:
             self.abort(f"not aligned after {self.max_seconds:.0f} s")
             return
         if status == "lost":
+            if self.overshot(now):
+                return
             self.lost += 1
             if self.lost >= 3:
                 self.abort(f"lost the box ({value})")
@@ -436,7 +478,9 @@ class GyroAligner:
                 self.observer.begin(now)
             return
         self.lost = 0
-        self.learn(value)
+        backed_up = self.last_move is not None and self.last_move[0] == "backup"
+        if not backed_up and self.learn(value) is False:  # a back-up undoes: nothing to learn
+            return
         self.last_move = None
         self.previous = value
         eu, eh, ev = errors(value, self.ref)
@@ -484,10 +528,14 @@ class GyroAligner:
     def plan_walk(self, h, eh):
         """(direction, seconds of actual walking, speed fraction) for the next segment."""
         if self.walk_rate is None:  # first segment: a modest probe
-            return (1 if eh < 0 else -1), 1.0, 1.0
+            seconds = 1.0 if self.max_forward is None or eh > 0 else min(1.0, self.max_forward)
+            amount = 1.0 if seconds >= self.MIN_WALK * 2 else self.FINE_AMOUNT
+            return (1 if eh < 0 else -1), max(self.MIN_WALK, seconds / amount), amount
         needed = walk_seconds(h, self.ref["h"], self.walk_rate)
         direction = 1 if needed > 0 else -1
         seconds = abs(needed) * 0.9  # undershoot slightly; the next look corrects
+        if direction > 0 and self.max_forward is not None:
+            seconds = min(seconds, self.max_forward)
         amount = 1.0
         if seconds < self.MIN_WALK * 2:  # too short at full speed: walk slower instead
             amount = self.FINE_AMOUNT
@@ -509,6 +557,10 @@ def alignment_legs_driver(driver):
 ALIGN_PURPLE = ((105, 40, 25), (170, 255, 255))
 ALIGN_MIN_AREA = 40
 ALIGN_DOMINANT = 2.0
+# The box sits on the floor, so it is seen below the horizon (mid-image or lower with the
+# camera level or tilted down by the kneel); blobs ending above this fraction of the height
+# are furniture (a blue chair part read as purple, 2026-10-21).
+ALIGN_FLOOR_FROM = 0.4
 
 
 def alignment_measure(color):
@@ -520,6 +572,8 @@ def alignment_measure(color):
 
     def measure(frame):
         found = detect_boxes(frame, min_area=ALIGN_MIN_AREA, ranges=ranges)
+        floor = ALIGN_FLOOR_FROM * frame.shape[0]
+        found[color] = [c for c in found.get(color, []) if c["bbox"][1] + c["bbox"][3] > floor]
         return teach_module.box_features(found, color, frame.shape, dominant=ALIGN_DOMINANT)
 
     return measure

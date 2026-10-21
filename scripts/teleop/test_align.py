@@ -31,7 +31,7 @@ class GyroSim:
     """A robot on a floor with one box. Legs, camera and gyro interfaces for the aligner."""
 
     def __init__(self, clock, bearing=20.0, distance=0.6, gyro_sign=1, walk_per_speed=0.0042,
-                 legs_sign=1, gyro_drift=0.0, coast=0.0):
+                 legs_sign=1, gyro_drift=0.0, coast=0.0, walk_dead=DEAD, hidden_above_h=None):
         self.clock = clock
         self.x = self.y = 0.0
         self.psi = 0.0  # heading, degrees, counter-clockwise positive
@@ -44,6 +44,9 @@ class GyroSim:
         self.gyro_drift = gyro_drift  # deg/s the gyro reading creeps by itself
         self.coast = coast  # degrees a turn keeps going after stop()
         self.turn_durations = []
+        self.walk_dead = walk_dead  # walking from a kneel starts slower than turning
+        self.hidden_above_h = hidden_above_h  # closer than this the box is under the head
+        self.closest = 1.0
 
     # --- legs -----------------------------------------------------------------------------
     def step(self, primitive, amount):
@@ -67,7 +70,8 @@ class GyroSim:
         if self.command is None:
             return self.x, self.y, self.psi
         primitive, sign = self.command
-        moving = max(0.0, now - self.started - DEAD) * sign * self.legs_sign * self.fraction
+        dead = DEAD if primitive == "turn" else self.walk_dead
+        moving = max(0.0, now - self.started - dead) * sign * self.legs_sign * self.fraction
         if primitive == "turn":
             return self.x, self.y, self.psi + 0.8 * SPEEDS["turn"] * moving
         travel = self.walk_per_speed * SPEEDS[primitive] * moving
@@ -87,9 +91,12 @@ class GyroSim:
         distance = math.hypot(dx, dy)
         left = math.degrees(math.atan2(dy, dx)) - psi
         right = -((left + 180) % 360 - 180)
+        self.closest = min(self.closest, distance)
         if abs(right) >= FOV / 2 or distance < 0.01:
             return None
         h = K / distance
+        if self.hidden_above_h is not None and h > self.hidden_above_h:
+            return None
         return {"u": 0.5 + right / FOV, "v": 0.56 + h, "h": h}
 
     def latest(self):
@@ -376,6 +383,22 @@ class GyroAlignerTests(Harness):
             self.run_until(90)
         self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
         self.assertTrue(self.said("Could not save"))
+
+    def test_slow_walking_start_up_is_learned_without_overshooting(self):
+        # measured 2026-10-21: a 1.5 s walk command from the kneel did not move the robot
+        self.make(walk_dead=1.5)
+        self.calibrated()
+        took = self.run_until(90)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertGreater(self.robot.closest, K / (REFERENCE["features"]["h"] * 1.3))
+        self.assertLess(took, 60, self.log)
+
+    def test_box_lost_right_after_walking_forward_means_too_close_so_back_up(self):
+        self.make(bearing=0.0, distance=K / 0.2, hidden_above_h=0.4)  # start nearly there
+        self.calibrated()
+        self.run_until(60)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertTrue(self.said("backing up"), self.log)
 
     def test_legs_going_the_wrong_way_are_stopped(self):
         self.make(legs_sign=-1)

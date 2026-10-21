@@ -900,6 +900,18 @@ class ReceiverTests(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertEqual(features["bbox"][:2], [368, 287])
 
+    def test_alignment_ignores_blobs_above_the_floor(self):
+        import cv2
+        import numpy as np
+
+        hsv = np.full((480, 640, 3), (99, 34, 137), dtype=np.uint8)
+        cv2.rectangle(hsv, (240, 112), (264, 128), (110, 160, 60), -1)  # a blue chair part
+        cv2.rectangle(hsv, (370, 290), (382, 302), (113, 157, 78), -1)  # the box on the floor
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        features, reason = receiver.alignment_measure("purple")(frame)
+        self.assertIsNone(reason)
+        self.assertEqual(features["bbox"][:2], [370, 290])
+
     def test_alignment_ignores_red(self):
         import cv2
         import numpy as np
