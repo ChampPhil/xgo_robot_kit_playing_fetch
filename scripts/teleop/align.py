@@ -503,7 +503,10 @@ def alignment_legs_driver(driver):
 # Far away under room lighting the purple box measures S~62, V~40 and hue up to ~175, outside
 # the recording's purple range; alignment uses a wider range plus a 40 px minimum, and takes a
 # clearly dominant box over small background specks.
-ALIGN_PURPLE = ((115, 40, 25), (170, 255, 255))  # stops short of red (hue 170-179 and 0-10)
+# Hue of the purple box varies with the light: 103-118 in brighter room light (2026-10-21),
+# >= 115 in the dim recording, up to ~175 far away. 105 overlaps light-blue (85-110), fine for
+# a single-box fetch; 170 stops short of red (170-179 and 0-10).
+ALIGN_PURPLE = ((105, 40, 25), (170, 255, 255))
 ALIGN_MIN_AREA = 40
 ALIGN_DOMINANT = 2.0
 

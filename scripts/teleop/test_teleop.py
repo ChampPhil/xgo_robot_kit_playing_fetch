@@ -889,6 +889,17 @@ class ReceiverTests(unittest.TestCase):
                      teach=teach_stub)
         self.assertEqual(stops, ["replay"])
 
+    def test_alignment_sees_the_box_when_brighter_light_makes_it_look_blue(self):
+        import cv2
+        import numpy as np
+
+        hsv = np.full((480, 640, 3), (99, 34, 137), dtype=np.uint8)  # the grey floor
+        cv2.rectangle(hsv, (368, 287), (388, 305), (113, 157, 78), -1)  # measured 2026-10-21
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        features, reason = receiver.alignment_measure("purple")(frame)
+        self.assertIsNone(reason)
+        self.assertEqual(features["bbox"][:2], [368, 287])
+
     def test_alignment_ignores_red(self):
         import cv2
         import numpy as np
