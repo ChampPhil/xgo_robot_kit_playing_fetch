@@ -340,10 +340,13 @@ class Replayer:
         """Cap idle pauses (including the wait before the first move) at max_gap seconds."""
         if not self.max_gap:
             return events
-        shortened, previous, when = [], 0.0, 0.0
+        shortened, previous, when, walking = [], 0.0, 0.0, False
         for event in events:
-            when += min(event["t"] - previous, self.max_gap)
+            gap = event["t"] - previous
+            when += gap if walking else min(gap, self.max_gap)  # walking time is not a pause
             previous = event["t"]
+            if "walk" in event:
+                walking = any(event["walk"].values())
             shortened.append(dict(event, t=round(when, 3)))
         return shortened
 
@@ -414,7 +417,10 @@ class TeachController:
         if self.pressed("record", message.record):
             self.toggle_recording()
         if self.pressed("replay", message.replay):
-            if manual:  # starting would move the arm/kneel only to abort on the same tick
+            if self.replayer.active:  # Y while replaying: stop, don't restart
+                self.replayer.abort()
+                self.log("Replay stopped (Y).")
+            elif manual:  # starting would move the arm/kneel only to abort on the same tick
                 self.log("Replay needs the sticks centred and LB/RB/LT released; "
                          "release them and press Y again.")
             else:

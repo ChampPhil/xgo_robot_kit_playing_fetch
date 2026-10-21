@@ -89,6 +89,8 @@ class HeadingHoldTests(unittest.TestCase):
     def test_learns_and_saves_the_gyro_direction_from_a_manual_turn(self):
         self.make()
         left = {"x": 0, "y": 0, "yaw": 25}
+        for _ in range(4):  # 0.8 s: gait start-up, ignored for learning
+            self.tick(left)
         self.tick(left)
         self.gyro.yaw = 3.0
         self.tick(left)
@@ -102,9 +104,38 @@ class HeadingHoldTests(unittest.TestCase):
                                     sign_path=Path(self.tmp.name) / "heading.json")
         self.assertEqual(again.sign, 1)
 
+    def test_direction_learning_ignores_the_gait_start_up(self):
+        self.make()
+        left = {"x": 0, "y": 0, "yaw": 25}
+        for yaw in (0.0, -6.0, -6.0):  # 0.6 s: legs not moving yet; reading wobbles anyway
+            self.gyro.yaw = yaw
+            self.tick(left)
+        self.assertIsNone(self.hold.sign)  # the wobble is not taken as a right turn
+        for yaw in (-6.0, -2.0, 3.0):  # now really turning left
+            self.gyro.yaw = yaw
+            self.tick(left)
+        self.assertEqual(self.hold.sign, 1)
+
+    def test_alignment_calibration_sets_the_direction(self):
+        self.make()
+        self.hold.adopt_sign(-1)
+        self.assertEqual(self.hold.sign, -1)
+        saved = json.loads((Path(self.tmp.name) / "heading.json").read_text())
+        self.assertEqual(saved["sign"], -1)
+        self.hold.adopt_sign(1)  # the camera-checked calibration wins over a learned one
+        self.assertEqual(self.hold.sign, 1)
+        self.assertTrue(any("gyro direction" in line for line in self.log))
+
+    def test_drift_is_measured_even_with_correction_switched_off(self):
+        self.make(sign=1, bias=None, gyro_bias=6.9, enabled=False)
+        self.stand_still(3.0)
+        self.assertAlmostEqual(self.hold.bias, 6.9, places=2)
+
     def test_learns_a_negative_direction_too(self):
         self.make()
         right = {"x": 0, "y": 0, "yaw": -25}
+        for _ in range(4):  # 0.8 s: gait start-up, ignored for learning
+            self.tick(right)
         self.tick(right)
         self.gyro.yaw = 7.0  # turning right made the reading go up: the gyro counts clockwise
         self.tick(right)
@@ -181,7 +212,7 @@ class HeadingHoldTests(unittest.TestCase):
         self.make(bias=None, gyro_bias=6.9)
         self.stand_still(3.0)
         right = {"x": 0, "y": 0, "yaw": -25}
-        for _ in range(8):
+        for _ in range(16):  # 3.2 s, the first 0.7 s ignored as gait start-up
             self.clock.now += 0.2
             self.gyro.yaw -= 1.0  # -5 deg/s true rotation
             self.hold.adjust(right)
@@ -254,6 +285,35 @@ class YawReaderTests(unittest.TestCase):
         self.assertRaises(TimeoutError, heading.make_yaw_reader(silent, timeout=0.05))
 
 
+class BlockingSerial(FakeSerial):
+    """Like pyserial: read() waits up to `timeout` when no byte is available."""
+
+    def __init__(self):
+        super().__init__(1.0)
+        self.reply = b""
+        self.timeout = 0.5
+
+    def read(self, size=1):
+        byte = super().read(size)
+        if not byte:
+            import time
+            time.sleep(self.timeout)
+        return byte
+
+
+class YawReaderTimeoutTests(unittest.TestCase):
+    def test_a_missing_reply_never_blocks_longer_than_the_reader_timeout(self):
+        import time
+
+        connection = BlockingSerial()  # the robot's xgolib opens the port with timeout=0.5
+        read = heading.make_yaw_reader(connection, timeout=0.05)
+        began = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            read()
+        self.assertLess(time.monotonic() - began, 0.15)
+        self.assertEqual(connection.timeout, 0.5)  # restored for xgolib
+
+
 class InnerDriver:
     def __init__(self):
         self.calls, self.current = [], dict(STOPPED)
@@ -306,6 +366,13 @@ class HeadingDriverTests(unittest.TestCase):
             driver.refresh(external_motion=True)
         self.assertIsNone(hold.bias)  # the turn was not taken for drift
         self.assertEqual(len(hold.still_samples), 0)
+
+    def test_the_legs_get_a_changed_command_before_the_recorder_hears_of_it(self):
+        order = []
+        self.inner.apply = lambda steps: order.append("legs")
+        self.driver.listener = lambda kind, value: order.append("recorder")
+        self.driver.apply(STRAIGHT)
+        self.assertEqual(order, ["legs", "recorder"])
 
     def test_stop_stops_and_resets(self):
         self.driver.apply(STRAIGHT)

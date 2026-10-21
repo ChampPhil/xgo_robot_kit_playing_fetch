@@ -421,6 +421,16 @@ class ReplayTests(unittest.TestCase):
         original.start(motion)
         self.assertEqual([e["t"] for e in original.events], [5.3, 5.4, 9.0, 9.1])
 
+    def test_shortening_never_cuts_walking_time(self):
+        motion = dict(MOTION, events=[{"t": 1.0, "walk": {"x": 12, "y": 0, "yaw": 0}},
+                                      {"t": 3.5, "walk": {"x": 0, "y": 0, "yaw": 0}},
+                                      {"t": 10.0, "claw": 200}])
+        replayer = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=0,
+                                  max_gap=0.5)
+        replayer.start(motion)
+        # idle lead-in capped to 0.5 s; the 2.5 s of walking kept; the idle wait capped again
+        self.assertEqual([e["t"] for e in replayer.events], [0.5, 3.0, 3.5])
+
     def test_replay_skips_unknown_start_pose_and_abort_stops(self):
         self.replayer.start(dict(MOTION, start={"arm": None, "claw": None, "kneel": 0.0}))
         self.assertEqual(self.arm.calls, [("kneel", 0.0)])
@@ -646,6 +656,16 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(any("while aligning" in line for line in self.log))
         self.teach.update(FakeMessage(record=3, replay=1), manual=False)
         self.assertFalse(self.replayer.active)  # the press was consumed, not deferred
+
+    def test_y_during_a_replay_stops_it_instead_of_restarting(self):
+        self.save_motion()
+        self.teach.update(FakeMessage(replay=1), manual=False)
+        self.assertTrue(self.replayer.active)
+        calls = len(self.arm.calls)
+        self.teach.update(FakeMessage(replay=2), manual=False)
+        self.assertFalse(self.replayer.active)
+        self.assertEqual(len(self.arm.calls), calls)  # no jump back to the start pose
+        self.assertTrue(any("Replay stopped" in line for line in self.log))
 
     def test_watchdog_aborts_replay_and_close_finalises(self):
         self.save_motion()

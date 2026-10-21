@@ -101,7 +101,7 @@ class Fetcher:
             if self.active:
                 self.cancel("F pressed again")
                 return False
-            self.start()
+            self.start(manual)
         if not self.active:
             return False
         if manual:
@@ -133,12 +133,19 @@ class Fetcher:
         self.end("FETCH done.")
         return False
 
-    def start(self):
+    def start(self, manual=False):
         if not self.motion:
             self.log("Fetch needs --align-motion (it walks by itself).")
             return
         if self.teach.busy:
             self.log("Fetch ignored while recording or replaying.")
+            return
+        if manual:
+            self.log("Fetch needs the controls released first.")
+            return
+        reference = getattr(self.aligner, "reference", None)
+        if callable(reference) and reference() is None:  # before the reset opens the claw
+            self.log("No recording to fetch from yet; record a pickup with X first.")
             return
         self.aligner.update(False, False)  # clear a refusal left by an earlier failed attempt
         self.fullreset.perform()

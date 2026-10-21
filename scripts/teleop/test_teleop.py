@@ -845,6 +845,16 @@ class ReceiverTests(unittest.TestCase):
         self.assertFalse(self.fetch_tick(fetcher, 1))
         self.assertEqual(self.events, [])
 
+    def test_fetch_checks_for_a_recording_and_idle_controls_before_resetting(self):
+        fetcher = self.make_fetcher()
+        self.aligner.reference = lambda: None
+        self.assertFalse(self.fetch_tick(fetcher, 1))
+        self.assertNotIn("full-reset", self.events)  # the claw is not opened for nothing
+        self.assertTrue(any("No recording" in entry for entry in self.log))
+        fetcher = self.make_fetcher()
+        self.assertFalse(self.fetch_tick(fetcher, 1, manual=True))
+        self.assertNotIn("full-reset", self.events)
+
     def test_fetch_watchdog_cancels(self):
         fetcher = self.make_fetcher()
         self.fetch_tick(fetcher, 1)
@@ -870,6 +880,23 @@ class ReceiverTests(unittest.TestCase):
                      0.5, self.log.append, aligner=aligner, fetcher=fetcher)
         self.assertEqual(calls, [(1, True, True), "watchdog"])  # aligner left to fetch
         self.assertNotIn(("x", 12), self.dog.calls)  # manual walking ignored while fetching
+
+    def test_a_bad_line_also_stops_a_replay(self):
+        stops = []
+        teach_stub = SimpleNamespace(busy=True, update=lambda message, manual, blocked=False: True,
+                                     watchdog=lambda: stops.append("replay"), close=lambda: None)
+        receiver.run(self.driver, Paced("garbage\n", receiver.EOF), 0.5, self.log.append,
+                     teach=teach_stub)
+        self.assertEqual(stops, ["replay"])
+
+    def test_alignment_ignores_red(self):
+        import cv2
+        import numpy as np
+
+        hsv = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.rectangle(hsv, (300, 200), (330, 230), (176, 200, 200), -1)  # a red object
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        self.assertIsNone(receiver.alignment_measure("purple")(frame)[0])
 
     def test_alignment_measures_far_dark_boxes_and_rescales_the_reference(self):
         import cv2

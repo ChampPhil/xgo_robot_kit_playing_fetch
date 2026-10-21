@@ -100,6 +100,8 @@ class Observer:
         if self.sharpness(frame) < self.min_sharpness:
             return ("stalled", "camera image stays blurry") if now > self.deadline else None
         features, reason = self.measure(frame)
+        if now > self.deadline:  # e.g. the box flickers in and out and never settles
+            return "stalled", "no steady view of the box"
         if features is None:
             self.previous = None
             self.misses += 1
@@ -126,10 +128,13 @@ class GyroAligner:
     MIN_WALK, MAX_WALK = 0.3, 2.5  # seconds of actual walking per segment
     FINE_AMOUNT = 0.5  # half speed when a full-speed segment would be too short
     TURN_RATE = 0.8  # deg/s per unit of turn speed (probe), only for turn deadlines
+    DRIFT_WAIT = 6.0  # seconds to wait for heading hold's drift estimate before giving up
+    TOO_BIG = 2.5  # a "box" this many times the reference height is something else
 
     def __init__(self, legs, pose, observer, read_yaw, reference, calibration_path, log, clock,
                  motion=False, recalibrate=False, settle=0.7, speeds=None, tol=None,
-                 max_seconds=45.0, max_moves=25, prepare_settle=1.0):
+                 max_seconds=45.0, max_moves=25, prepare_settle=1.0, drift=None,
+                 gyro_sign_learned=None):
         self.legs = legs
         self.pose = pose
         self.observer = observer
@@ -146,6 +151,8 @@ class GyroAligner:
         self.max_seconds = max_seconds
         self.max_moves = max_moves
         self.prepare_settle = prepare_settle
+        self.drift = drift or (lambda: 0.0)  # gyro drift in deg/s (None until measured)
+        self.gyro_sign_learned = gyro_sign_learned  # tell heading hold the checked direction
         self.active = False
         self.refused = False
         self.phase = None
@@ -205,6 +212,7 @@ class GyroAligner:
         self.lead = 1.0  # degrees the robot keeps turning after a stop
         self.prev_norm, self.grow, self.in_tol, self.lost = None, 0, 0, 0
         self.last_move, self.last_display = None, None
+        self.drift_wait = None
         self.phase = "initial"
         if self.motion:
             self.pose.prepare(state.get("kneel", 0.0), state.get("arm"))
@@ -232,17 +240,24 @@ class GyroAligner:
         target = abs(degrees_left)
         rate = self.TURN_RATE * self.speeds["turn"]
         self.turn = {"start": start, "direction": direction, "target": target, "fails": 0,
+                     "began": now, "bias": self.drift() or 0.0,
                      "deadline": now + self.DEAD + target / rate + 2.0}
         self.legs.step("turn", direction)
         self.moving = "turn"
         self.last_move = ("turn", direction, target)
 
     def turned(self, yaw):
-        """Degrees turned in the commanded direction (absolute until the gyro sign is known)."""
-        change = angle_diff(yaw, self.turn["start"])
+        """Degrees turned in the commanded direction (absolute until the gyro sign is known),
+        with the gyro's own drift since the turn began subtracted."""
+        change = self.raw_turn(yaw)
         if self.calibration is None:
             return abs(change)
         return change * self.calibration["gyro_sign"] * self.turn["direction"]
+
+    def raw_turn(self, yaw):
+        """Gyro change since the turn began, minus drift, in the gyro's own direction."""
+        elapsed = self.clock() - self.turn["began"]
+        return angle_diff(yaw, self.turn["start"]) - self.turn["bias"] * elapsed
 
     def turn_tick(self, now):
         yaw = self.yaw()
@@ -252,8 +267,11 @@ class GyroAligner:
                 self.abort("the gyro stopped answering during a turn")
             return
         self.turn["fails"] = 0
+        if now - self.turn["began"] < self.DEAD and now < self.turn["deadline"]:
+            return  # the legs have not started yet: never stop a turn before it begins
         progress = self.turned(yaw)
-        if progress >= self.turn["target"] - self.lead or now >= self.turn["deadline"]:
+        lead = min(self.lead, 0.5 * self.turn["target"])
+        if progress >= self.turn["target"] - lead or now >= self.turn["deadline"]:
             self.legs.stop()
             self.moving = None
             self.turn["at_stop"] = progress
@@ -296,6 +314,19 @@ class GyroAligner:
         if status == "lost":
             self.abort(f"box not in view at the start ({value})")
             return
+        reason = self.implausible(value)
+        if reason:
+            self.abort(reason)
+            return
+        if self.drift() is None:  # turns are measured with the gyro, minus its drift
+            if self.drift_wait is None:
+                self.drift_wait = now
+                self.log("ALIGN: measuring the gyro drift first; keep the robot still...")
+            if now - self.drift_wait > self.DRIFT_WAIT:
+                self.abort("gyro drift not measured (heading hold needs ~2.5 s standing still)")
+                return
+            self.observer.begin(now + 0.5)
+            return
         self.previous = value
         if self.calibration is None:
             # turn toward the box so it stays in view; measure degrees per image width
@@ -306,6 +337,12 @@ class GyroAligner:
             return
         self.phase, self.align_started = "align", now
         self.on_align(status, value, now)
+
+    def implausible(self, value):
+        if value["h"] > self.TOO_BIG * self.ref["h"]:
+            return ("the 'box' looks far too big ({:.0%} of the image height): another purple "
+                    "object?".format(value["h"]))
+        return None
 
     def on_display(self, status, value, now):
         if self.last_display is None or now - self.last_display >= 1.0:
@@ -337,7 +374,7 @@ class GyroAligner:
         if yaw is None:
             self.abort("no gyro reading after the calibration turn")
             return
-        raw = angle_diff(yaw, self.turn["start"])
+        raw = self.raw_turn(yaw)
         du = value["u"] - self.cal_u
         if abs(raw) < self.MIN_TURN or abs(du) < 0.02:
             self.abort("the calibration turn did not move the box (did the legs start?)")
@@ -349,7 +386,12 @@ class GyroAligner:
             self.abort("the calibration turn moved the box the wrong way")
             return
         self.calibration = dict(self.setup, deg_per_u=round(deg_per_u, 2), gyro_sign=gyro_sign)
-        save_calibration(self.calibration_path, self.calibration)
+        try:
+            save_calibration(self.calibration_path, self.calibration)
+        except OSError as exc:  # e.g. a full disk: keep going with it for this session
+            self.log(f"Could not save the calibration ({exc}); using it for this session only.")
+        if self.gyro_sign_learned:
+            self.gyro_sign_learned(gyro_sign)
         self.recalibrate = False
         self.log("CALIBRATE done: {:.0f} deg across the image, gyro {}.".format(
             deg_per_u, "counter-clockwise positive" if gyro_sign == 1 else "clockwise positive"))
@@ -361,8 +403,8 @@ class GyroAligner:
         """Update the turn lead and walking rate from what the last move actually did."""
         if self.last_move is None:
             return
-        if self.last_move[0] == "turn" and "at_stop" in self.turn:
-            yaw = self.yaw()
+        if self.last_move[0] == "turn" and self.turn.get("at_stop", 0.0) >= 1.0:
+            yaw = self.yaw()  # learn the coast only from turns that really moved
             if yaw is not None:
                 coast = self.turned(yaw) - self.turn["at_stop"]
                 self.lead = max(0.0, min(8.0, 0.7 * self.lead + 0.3 * coast))
@@ -381,6 +423,15 @@ class GyroAligner:
             self.lost += 1
             if self.lost >= 3:
                 self.abort(f"lost the box ({value})")
+            else:
+                self.observer.begin(now)
+            return
+        reason = self.implausible(value)
+        if reason:
+            status, value = "lost", reason
+            self.lost += 1
+            if self.lost >= 3:
+                self.abort(reason)
             else:
                 self.observer.begin(now)
             return
@@ -452,7 +503,7 @@ def alignment_legs_driver(driver):
 # Far away under room lighting the purple box measures S~62, V~40 and hue up to ~175, outside
 # the recording's purple range; alignment uses a wider range plus a 40 px minimum, and takes a
 # clearly dominant box over small background specks.
-ALIGN_PURPLE = ((115, 40, 25), (178, 255, 255))
+ALIGN_PURPLE = ((115, 40, 25), (170, 255, 255))  # stops short of red (hue 170-179 and 0-10)
 ALIGN_MIN_AREA = 40
 ALIGN_DOMINANT = 2.0
 

@@ -20,6 +20,7 @@ from teach import write_json_atomic
 
 YAW_REGISTER = 0x64
 LEARN_DEGREES = 5.0
+LEARN_SKIP = 0.7  # seconds of gait start-up at the beginning of a turn, ignored for learning
 STILL_SETTLE = 0.5  # seconds after the legs stop before samples count
 DRIFT_WINDOW = 5.0  # seconds of still samples kept for the drift fit
 DRIFT_MIN_SPAN = 2.0  # seconds of still samples needed before trusting the fit
@@ -50,7 +51,17 @@ def make_yaw_reader(connection, timeout=0.05):
     reader = XGOReader(connection, timeout=timeout)
 
     def read():
-        angle = struct.unpack("<f", reader.read_register(YAW_REGISTER, 4))[0]
+        # The port's own timeout (0.5 s in the robot's xgolib) would make each missing byte
+        # wait that long; use short reads so a missing reply costs at most `timeout`.
+        saved = getattr(connection, "timeout", None)
+        try:
+            if saved is not None:
+                connection.timeout = min(saved, 0.01)
+            data = reader.read_register(YAW_REGISTER, 4)
+        finally:
+            if saved is not None:
+                connection.timeout = saved
+        angle = struct.unpack("<f", data)[0]
         if not math.isfinite(angle):
             raise ValueError("non-finite yaw")
         return angle
@@ -78,6 +89,7 @@ class HeadingHold:
         self.told_to_turn = False
         self.told_to_stand = False
         self.turn_start = None
+        self.turn_began = None
         self.bias = bias  # gyro drift in deg/s; None until measured while standing still
         self.still_since = None
         self.still_samples = deque()
@@ -127,9 +139,8 @@ class HeadingHold:
         return angle_diff(yaw, start[0]) - self.bias * (self.clock() - start[1])
 
     def idle(self):
-        """Called every tick while the legs are stopped: keep the drift estimate fresh."""
-        if not self.enabled:
-            return
+        """Called every tick while the legs are stopped: keep the drift estimate fresh (also
+        when correction is off: alignment uses it)."""
         now = self.clock()
         if self.still_since is None:
             self.still_since = now
@@ -162,9 +173,25 @@ class HeadingHold:
         self.still_since = None
         self.still_samples.clear()
 
+    def adopt_sign(self, sign):
+        """Take the gyro direction from the alignment calibration (checked with the camera)."""
+        if sign == self.sign:
+            return
+        if self.sign is not None:
+            self.log("Heading hold: gyro direction corrected by the alignment calibration.")
+        else:
+            self.log("Heading hold ready: gyro direction from the alignment calibration.")
+        self.sign = sign
+        self.save_sign()
+
     def learn(self, turn_command):
         if self.bias is None:
             return  # a slow turn plus unknown drift could be misread
+        now = self.clock()
+        if self.turn_began is None:
+            self.turn_began = now
+        if now - self.turn_began < LEARN_SKIP:
+            return  # the legs are not turning yet; the reading only wobbles
         yaw = self.read()
         if yaw is None:
             return
@@ -190,7 +217,7 @@ class HeadingHold:
             if self.sign is None:
                 self.learn(steps["yaw"])
             return steps
-        self.turn_start = None
+        self.turn_start = self.turn_began = None
         if not (steps["x"] or steps["y"]):
             self.reset()
             return steps
@@ -253,11 +280,11 @@ class HeadingDriver:
         if not any(steps.values()):
             self.stop()
             return
-        if steps != self.current:
-            self.current = steps
-            if self.listener:
-                self.listener("walk", dict(steps))
-        self.inner.apply(self.hold.adjust(steps))
+        changed = steps != self.current
+        self.current = steps
+        self.inner.apply(self.hold.adjust(steps))  # legs first: the recorder may fsync
+        if changed and self.listener:
+            self.listener("walk", dict(steps))
 
     def refresh(self, external_motion=False):
         """Called every loop tick: keeps a walk that is not re-sent (replay) corrected, and

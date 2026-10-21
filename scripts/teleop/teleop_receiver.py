@@ -235,6 +235,8 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                     aligner.watchdog()
                 if fetcher is not None:
                     fetcher.watchdog()
+                if teach is not None:
+                    teach.watchdog()  # a replay must not resume from wherever the legs are
                 continue
             fetching = fetcher is not None and fetcher.update(message.fetch, message.manual,
                                                               message.attended)
@@ -270,7 +272,9 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
             if hasattr(driver, "refresh"):
                 # keep correcting walking drift (also replayed walks); alignment moves the legs
                 # itself, so its turns must not be measured as gyro drift
-                driver.refresh(external_motion=aligning)
+                # (while it only looks, drift can still be measured)
+                driver.refresh(external_motion=aligning
+                               and getattr(aligner, "moving", True) is not None)
     finally:
         driver.stop()
         try:
@@ -413,7 +417,8 @@ def main(argv=None):
             calibration_path=teach_dir / "calibration.json", log=log, clock=time.monotonic,
             motion=args.align_motion, recalibrate=args.recalibrate, settle=args.settle,
             speeds=speeds, tol={"u": args.tol_u, "h": args.tol_h, "v": args.tol_v},
-            max_seconds=args.align_max_seconds, max_moves=int(args.align_max_moves))
+            max_seconds=args.align_max_seconds, max_moves=int(args.align_max_moves),
+            drift=lambda: hold.bias, gyro_sign_learned=hold.adopt_sign)
         fullreset = FullReset(dog, driver, arm, posture, ramp, log)
         fetcher = Fetcher(fullreset, aligner, controller, log, time.monotonic,
                           motion=args.align_motion)

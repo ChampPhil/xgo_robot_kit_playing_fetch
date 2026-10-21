@@ -7,6 +7,7 @@ import json
 import math
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import align
@@ -30,7 +31,7 @@ class GyroSim:
     """A robot on a floor with one box. Legs, camera and gyro interfaces for the aligner."""
 
     def __init__(self, clock, bearing=20.0, distance=0.6, gyro_sign=1, walk_per_speed=0.0042,
-                 legs_sign=1):
+                 legs_sign=1, gyro_drift=0.0, coast=0.0):
         self.clock = clock
         self.x = self.y = 0.0
         self.psi = 0.0  # heading, degrees, counter-clockwise positive
@@ -40,6 +41,9 @@ class GyroSim:
         self.gyro_sign, self.walk_per_speed, self.legs_sign = gyro_sign, walk_per_speed, legs_sign
         self.command, self.started, self.stopped_at = None, None, -10.0
         self.steps, self.gyro_fail = [], False
+        self.gyro_drift = gyro_drift  # deg/s the gyro reading creeps by itself
+        self.coast = coast  # degrees a turn keeps going after stop()
+        self.turn_durations = []
 
     # --- legs -----------------------------------------------------------------------------
     def step(self, primitive, amount):
@@ -52,6 +56,10 @@ class GyroSim:
     def stop(self):
         if self.command is not None:
             self.x, self.y, self.psi = self.pose(self.clock())
+            if self.command[0] == "turn":
+                self.turn_durations.append(self.clock() - self.started)
+                if self.clock() - self.started > DEAD:
+                    self.psi += self.coast * self.command[1] * self.legs_sign
             self.stopped_at = self.clock()
         self.command = None
 
@@ -70,7 +78,7 @@ class GyroSim:
     def read_yaw(self):
         if self.gyro_fail:
             raise TimeoutError("no valid reply from register 0x64")
-        return self.gyro_sign * self.pose(self.clock())[2]
+        return self.gyro_sign * self.pose(self.clock())[2] + self.gyro_drift * (self.clock() - 100)
 
     # --- camera ---------------------------------------------------------------------------
     def view(self):
@@ -79,7 +87,7 @@ class GyroSim:
         distance = math.hypot(dx, dy)
         left = math.degrees(math.atan2(dy, dx)) - psi
         right = -((left + 180) % 360 - 180)
-        if abs(right) >= FOV / 2 or distance < 0.03:
+        if abs(right) >= FOV / 2 or distance < 0.01:
             return None
         h = K / distance
         return {"u": 0.5 + right / FOV, "v": 0.56 + h, "h": h}
@@ -110,7 +118,8 @@ CALIBRATION = {"version": 2, "deg_per_u": 94.0, "gyro_sign": 1, "speeds": SPEEDS
 
 
 class Harness(unittest.TestCase):
-    def make(self, motion=True, reference=REFERENCE, recalibrate=False, cal_dir=None, **sim):
+    def make(self, motion=True, reference=REFERENCE, recalibrate=False, cal_dir=None,
+             drift=0.0, **sim):
         self.clock = Clock()
         self.robot = GyroSim(self.clock, **sim)
         self.pose = Pose()
@@ -120,12 +129,15 @@ class Harness(unittest.TestCase):
             self.addCleanup(tmp.cleanup)
             cal_dir = tmp.name
         self.cal_path = Path(cal_dir) / "calibration.json"
+        self.learned = []  # gyro directions reported to heading hold
         observer = align.Observer(self.robot, measure, lambda f: f["sharp"], self.clock,
                                   min_sharpness=50)
         self.aligner = align.GyroAligner(
             legs=self.robot, pose=self.pose, observer=observer, read_yaw=self.robot.read_yaw,
             reference=lambda: reference, calibration_path=self.cal_path, log=self.log.append,
-            clock=self.clock, motion=motion, recalibrate=recalibrate, speeds=SPEEDS)
+            clock=self.clock, motion=motion, recalibrate=recalibrate, speeds=SPEEDS,
+            drift=(drift if callable(drift) else (lambda: drift)),
+            gyro_sign_learned=self.learned.append)
         return self.aligner
 
     def calibrated(self):
@@ -201,6 +213,18 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(status, "ok")
         self.assertAlmostEqual(features["u"], 0.5 + 5 / FOV, places=3)
         self.assertGreaterEqual(self.clock.now, 100.5)
+
+    def test_a_view_that_never_settles_times_out(self):
+        flicker = [True]
+
+        def latest():
+            flicker[0] = not flicker[0]
+            features = {"u": 0.5, "v": 0.6, "h": 0.2} if flicker[0] else None
+            return {"features": features, "sharp": 400.0}, self.clock.now
+
+        self.robot.latest = latest  # found, missing, found, ... never two agreeing frames
+        self.observer.begin(self.clock.now)
+        self.assertEqual(self.poll_for(3.0)[0], "stalled")
 
     def test_missing_box_and_stalled_camera(self):
         self.robot.bx = -1.0  # behind the robot
@@ -314,6 +338,44 @@ class GyroAlignerTests(Harness):
         self.calibrated()
         self.run_until(10)
         self.assertTrue(self.said("view mismatch"), self.log[-3:])
+
+    def test_gyro_drift_is_subtracted_in_calibration_and_turns(self):
+        self.make(gyro_drift=19.0, drift=19.0)  # the worst drift seen on the robot
+        took = self.run_until(90)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        calibration = align.load_calibration(self.cal_path)
+        self.assertEqual(calibration["gyro_sign"], 1)
+        self.assertAlmostEqual(calibration["deg_per_u"], FOV, delta=FOV * 0.15)
+        self.assertLess(took, 45)
+        self.assertEqual(self.learned, [1])  # heading hold is told the calibrated direction
+
+    def test_waits_for_a_drift_estimate_then_gives_up(self):
+        self.make(drift=None)
+        self.run_until(10)
+        self.assertTrue(self.said("drift"), self.log)
+        self.assertEqual(self.robot.steps, [])
+        self.assertFalse(self.aligner.active)
+
+    def test_turns_never_stop_before_the_legs_start_and_coast_is_handled(self):
+        self.make(coast=3.0)
+        self.run_until(90)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertTrue(all(d > DEAD for d in self.robot.turn_durations), self.robot.turn_durations)
+
+    def test_a_far_too_big_blob_is_not_taken_for_the_box(self):
+        self.make(bearing=0.0, distance=K / 0.7)  # 2.9x the reference size: another object
+        self.calibrated()
+        self.run_until(10)
+        self.assertTrue(self.said("too big"), self.log[-3:])
+        self.assertEqual([s for s in self.robot.steps if s[0] == "forward"], [])
+
+    def test_a_calibration_that_cannot_be_saved_still_aligns(self):
+        self.make()
+        with unittest.mock.patch.object(align, "save_calibration",
+                                        side_effect=OSError(28, "No space left on device")):
+            self.run_until(90)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertTrue(self.said("Could not save"))
 
     def test_legs_going_the_wrong_way_are_stopped(self):
         self.make(legs_sign=-1)
