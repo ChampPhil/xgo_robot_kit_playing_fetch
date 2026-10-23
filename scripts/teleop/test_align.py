@@ -66,7 +66,7 @@ class GyroSim:
             if self.command[0] == "turn":
                 self.turn_durations.append(self.clock() - self.started)
                 if self.clock() - self.started > DEAD:
-                    self.psi += self.coast * self.command[1] * self.legs_sign
+                    self.psi += self.coast * self.command[1] * self.legs_sign * self.fraction
             self.stopped_at = self.clock()
         self.command = None
 
@@ -381,6 +381,15 @@ class GyroAlignerTests(Harness):
         self.run_until(90)
         self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
         self.assertTrue(all(d > DEAD for d in self.robot.turn_durations), self.robot.turn_durations)
+
+    def test_small_corrections_do_not_swing_back_and_forth(self):
+        # measured 2026-10-23: 5-6 deg commands turned 10-11 deg; eight turns to settle
+        self.make(bearing=6.0, distance=K / 0.2, coast=6.0)
+        self.calibrated()
+        self.run_until(60)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        turns = [line for line in self.log if "-> turn" in line]
+        self.assertLessEqual(len(turns), 3, turns)
 
     def test_a_far_too_big_blob_is_not_taken_for_the_box(self):
         self.make(bearing=0.0, distance=K / 0.7)  # 2.9x the reference size: another object

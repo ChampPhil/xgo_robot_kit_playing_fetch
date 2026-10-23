@@ -127,6 +127,9 @@ class GyroAligner:
     MIN_TURN = 3.0  # smaller corrections cannot be executed reliably
     MIN_WALK, MAX_WALK = 0.3, 2.5  # seconds of actual walking per segment
     FINE_AMOUNT = 0.5  # half speed when a full-speed segment would be too short
+    # Small turns at half speed: at full speed a turn keeps going ~5 deg after the stop, so
+    # 5-6 deg corrections turned 10-11 deg and swung back and forth (2026-10-23).
+    FINE_TURN = 12.0
     TURN_RATE = 0.8  # deg/s per unit of turn speed (probe), only for turn deadlines
     DRIFT_WAIT = 6.0  # seconds to wait for heading hold's drift estimate before giving up
     TOO_BIG = 2.5  # a "box" this many times the reference height is something else
@@ -216,7 +219,7 @@ class GyroAligner:
         self.calibration = calibration
         self.active, self.started, self.moves = True, now, 0
         self.walk_rate = None  # how fast 1/h falls per second of full-speed forward walking
-        self.lead = 1.0  # degrees the robot keeps turning after a stop
+        self.lead = {1.0: 1.0, self.FINE_AMOUNT: 1.0}  # degrees turned after a stop, by speed
         self.prev_norm, self.grow, self.in_tol, self.lost = None, 0, 0, 0
         self.last_move, self.last_display = None, None
         self.drift_wait = None
@@ -250,11 +253,12 @@ class GyroAligner:
             return
         direction = 1 if degrees_left > 0 else -1
         target = abs(degrees_left)
-        rate = self.TURN_RATE * self.speeds["turn"]
+        amount = self.FINE_AMOUNT if target < self.FINE_TURN and self.calibration else 1.0
+        rate = self.TURN_RATE * self.speeds["turn"] * amount
         self.turn = {"start": start, "direction": direction, "target": target, "fails": 0,
-                     "began": now, "bias": self.drift() or 0.0,
+                     "began": now, "bias": self.drift() or 0.0, "amount": amount,
                      "deadline": now + self.DEAD + target / rate + 2.0}
-        self.legs.step("turn", direction)
+        self.legs.step("turn", direction * amount)
         self.moving = "turn"
         self.last_move = ("turn", direction, target)
 
@@ -282,7 +286,7 @@ class GyroAligner:
         if now - self.turn["began"] < self.DEAD and now < self.turn["deadline"]:
             return  # the legs have not started yet: never stop a turn before it begins
         progress = self.turned(yaw)
-        lead = min(self.lead, 0.5 * self.turn["target"])
+        lead = min(self.lead[self.turn["amount"]], 0.8 * self.turn["target"])
         if progress >= self.turn["target"] - lead or now >= self.turn["deadline"]:
             self.legs.stop()
             self.moving = None
@@ -474,7 +478,8 @@ class GyroAligner:
             yaw = self.yaw()  # learn the coast only from turns that really moved
             if yaw is not None:
                 coast = self.turned(yaw) - self.turn["at_stop"]
-                self.lead = max(0.0, min(8.0, 0.7 * self.lead + 0.3 * coast))
+                amount = self.turn["amount"]
+                self.lead[amount] = max(0.0, min(8.0, 0.5 * self.lead[amount] + 0.5 * coast))
         elif self.last_move[0] == "walk":
             walked = self.walk["seconds"] * self.walk["amount"]
             change = (1.0 / self.previous["h"] - 1.0 / value["h"]) * self.walk["direction"]
