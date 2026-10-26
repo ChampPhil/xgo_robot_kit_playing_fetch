@@ -159,22 +159,41 @@ with no drift**. Alignment therefore:
 
 - **Turns in one move, on the gyro:** the angle comes from where the box sits in the image
   (degrees per image width), and the turn stops when the gyro reports it. A failed gyro read
-  stops the turn.
+  stops the turn. Normal alignment corrections are capped at 12° before looking again;
+  crossing past the target halves the next correction gain. Turns below 12° use half speed,
+  and below 6° use quarter speed. Coast compensation is learned separately for each speed.
 - **Walks in timed segments** that include the 0.5 s start-up; since apparent size ∝ 1/distance,
   1/size falls linearly while walking, so the time to the target size is planned from the
-  measured rate. Short final corrections walk at half speed.
+  measured rate. Short corrections walk at half speed; inside 15% size error they use quarter
+  speed. The minimum planned travel time is 0.15 s **plus** the learned gait start-up time.
 - **Calibrates once** with a single 15° turn toward the box (degrees per image width and which
   way the gyro counts), saved to `~/xgo_teach/calibration.json`; `--recalibrate` redoes it.
 - **Sees far boxes:** at ~60 cm the purple box is only ~11 px and dark (S≈62, V≈40, hue up to
-  ~175), so alignment uses a wider purple range (H115–178, S≥40, V≥25), a 40 px minimum, and
+  ~175), so alignment uses a wider purple range (H105–170, S≥40, V≥25), a 40 px minimum, and
   takes a box at least twice the area of any other blob (background specks). The reference
   photo is re-measured with the same detector so sizes compare like for like.
 - **Display-only by default:** without `--align-motion`, holding A only logs the error and the
   move it would make.
-- Aligned = box centre within `--tol-u` (0.04 of the width) and size within `--tol-h` (8%) on two
-  looks in a row. It stops and says why on release, any manual input, no commands for 0.5 s, the
+- Aligned = box centre within `--tol-u` (0.02 of image width), size within `--tol-h` (4%), and
+  vertical centre within `--tol-v` (0.025 of image height). It requires three consecutive
+  stopped observations, spaced at least 0.25 s apart; **both frames** of each observation
+  must meet the tolerances. A lost detection clears the confirmation count. At 640×480,
+  these centre tolerances are 12.8 px horizontally and 12 px vertically.
+- It stops and says why on release, any manual input, no commands for 0.5 s, the
   box lost 3 times, a stalled camera, the error growing 3 moves in a row, `--align-max-moves`
   (25) or `--align-max-seconds` (45), or "view mismatch" (right size, wrong height in the image).
+  Two consecutive minimum-size turns that still cross outside tolerance also stop alignment;
+  it does not relax the tolerance and replay anyway.
+
+**2026-10-26 precision changes were deployed and completed one successful hardware fetch.**
+The old 4% horizontal / 8% size limits accepted `eu=-0.03, eh=-0.07` before a partial grasp;
+this residual is now rejected. The new trial aligned at `eu=+0.017, eh=-0.017, ev=+0.010`
+over three settled observations and finished in about 55 s; the user confirmed the box was
+held and lifted. The user first moved the box closer because the far box was filtered out;
+this does not establish far-box or multi-position reliability. For precision tuning, use
+supervised **alignment-only** checks (hold Space in the keyboard window; release to stop)
+without pressing F or Y. A close image match still does not verify contact, grip, block
+orientation, or the camera-to-arm transform.
 
 Tuning: `--align-turn` (40), `--align-walk` (12). Floor only, supervised, within reach.
 

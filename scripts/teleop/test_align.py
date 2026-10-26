@@ -32,7 +32,7 @@ class GyroSim:
 
     def __init__(self, clock, bearing=20.0, distance=0.6, gyro_sign=1, walk_per_speed=0.0042,
                  legs_sign=1, gyro_drift=0.0, coast=0.0, walk_dead=DEAD, hidden_above_h=None,
-                 clipped_above_h=None, visible=None):
+                 clipped_above_h=None, visible=None, view_gain=1.0):
         self.clock = clock
         self.x = self.y = 0.0
         self.psi = 0.0  # heading, degrees, counter-clockwise positive
@@ -51,6 +51,7 @@ class GyroSim:
         self.clipped_above_h = clipped_above_h  # closer: cut off by the bottom of the image
         self.visible = visible  # (kneel, distance) -> whether the camera can see the box
         self.kneel = 1.0
+        self.view_gain = view_gain  # near targets can move farther in the image per gyro degree
 
     # --- legs -----------------------------------------------------------------------------
     def step(self, primitive, amount):
@@ -95,6 +96,7 @@ class GyroSim:
         distance = math.hypot(dx, dy)
         left = math.degrees(math.atan2(dy, dx)) - psi
         right = -((left + 180) % 360 - 180)
+        right *= self.view_gain
         self.closest = min(self.closest, distance)
         if abs(right) >= FOV / 2 or distance < 0.01:
             return None
@@ -232,6 +234,7 @@ class ObserverTests(unittest.TestCase):
         status, features = self.poll_for(1.5)
         self.assertEqual(status, "ok")
         self.assertAlmostEqual(features["u"], 0.5 + 5 / FOV, places=3)
+        self.assertEqual(len(features["samples"]), 2)
         self.assertGreaterEqual(self.clock.now, 100.5)
 
     def test_a_view_that_never_settles_times_out(self):
@@ -256,6 +259,73 @@ class ObserverTests(unittest.TestCase):
 
 
 class GyroAlignerTests(Harness):
+    def test_partial_grasp_residual_is_not_accepted_as_aligned(self):
+        for eu, eh in ((-0.03, -0.07), (-0.03, 0.0), (0.0, -0.07)):
+            with self.subTest(eu=eu, eh=eh):
+                self.make(bearing=eu * FOV, distance=K / (0.24 * (1 + eh)))
+                self.calibrated()
+                self.run_until(1.5)
+                self.assertNotEqual(self.aligner.phase, "aligned")
+                self.assertFalse(self.said("ALIGNED"))
+                self.assertTrue(self.robot.steps)
+
+    def test_alignment_confirmation_restarts_after_a_missing_detection(self):
+        self.make(bearing=0.0, distance=K / 0.24)
+        self.calibrated()
+        self.aligner.begin()
+        self.aligner.phase = "align"
+        self.aligner.align_started = self.clock()
+        self.aligner.previous = self.robot.view()
+        value = self.robot.view()
+        self.aligner.on_align("ok", value, self.clock())
+        self.aligner.on_align("lost", "no purple box in view", self.clock())
+        self.aligner.on_align("ok", value, self.clock())
+        self.assertNotEqual(self.aligner.phase, "aligned")
+        self.assertEqual(self.aligner.in_tol, 1)
+
+    def test_an_out_of_tolerance_frame_cannot_average_into_alignment(self):
+        self.make(bearing=0.0, distance=K / 0.24)
+        self.calibrated()
+        self.aligner.begin()
+        self.aligner.phase = "align"
+        self.aligner.align_started = self.clock()
+        value = self.robot.view()
+        value["u"] = 0.519
+        # These frames pass the observer's 0.02 agreement check. Their mean is within
+        # the final 0.02 tolerance, but one actual frame is outside it.
+        value["samples"] = (dict(value, u=0.510), dict(value, u=0.528))
+        for _ in range(4):
+            self.aligner.on_align("ok", value, self.clock())
+        self.assertNotEqual(self.aligner.phase, "aligned")
+        self.assertEqual(self.aligner.in_tol, 0)
+
+    def test_confirmation_waits_for_three_separated_observations(self):
+        self.make(bearing=0.0, distance=K / 0.24)
+        self.calibrated()
+        self.aligner.begin()
+        self.aligner.phase = "align"
+        self.aligner.align_started = self.clock()
+        value = self.robot.view()
+        for _ in range(2):
+            self.aligner.on_align("ok", value, self.clock())
+            self.assertGreater(self.aligner.observer.not_before, self.clock())
+            self.clock.now += 0.25
+            self.assertNotEqual(self.aligner.phase, "aligned")
+        self.aligner.on_align("ok", value, self.clock())
+        self.assertEqual(self.aligner.phase, "aligned")
+
+    def test_near_target_with_stronger_visual_response_does_not_keep_oscillating(self):
+        # The live trial swung from eu=-0.08 to +0.16 after an 8-degree turn.
+        # This is a stress model, not a measured camera-to-body transform.
+        self.make(bearing=2.4, distance=K / 0.24, coast=6.0, view_gain=2.5)
+        self.calibrated()
+        self.run_until(45)
+        self.assertEqual(self.aligner.phase, "aligned", self.log)
+        turns = [line for line in self.log if "-> turn" in line]
+        self.assertLessEqual(len(turns), 5, turns)
+        self.assertLessEqual(abs(self.robot.errors()[0]), 0.02)
+        self.assertLessEqual(abs(self.robot.errors()[1]), 0.04)
+
     def test_quick_calibration_measures_the_camera_with_the_gyro(self):
         self.make()
         self.run_until(15, stop_when_aligned=False)
@@ -289,11 +359,22 @@ class GyroAlignerTests(Harness):
 
     def test_other_starting_positions(self):
         for bearing, distance in ((-15.0, 0.5), (0.0, 0.3), (30.0, 0.45)):
-            self.make()
+            self.make(bearing=bearing, distance=distance)
             self.calibrated()
             took = self.run_until(90)
             self.assertEqual(self.aligner.phase, "aligned", (bearing, distance, self.log[-4:]))
             self.assertLess(took, 45, (bearing, distance))
+
+    def test_unachievable_precision_stops_before_replay_or_repeated_oscillation(self):
+        self.make(bearing=-15, distance=0.5, view_gain=2.5, coast=6)
+        self.calibrated()
+        self.run_until(45)
+        self.assertFalse(self.aligner.active, self.log)
+        self.assertFalse(self.said("ALIGNED"), self.log)
+        self.assertTrue(self.said("minimum turn still overshoots"), self.log)
+        self.assertIsNone(self.robot.command)
+        self.assertLess(self.aligner.moves, 15)
+        self.assertTrue(self.said("correction gain"), self.log)
 
     def test_gyro_counting_the_other_way_is_handled(self):
         self.make(gyro_sign=-1)

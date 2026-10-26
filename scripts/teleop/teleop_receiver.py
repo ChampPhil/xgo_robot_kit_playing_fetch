@@ -27,7 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "sensor_monitor"))
 
 from actions import BARK_SOUND, Barker, Fetcher, FullReset, ResetButton  # noqa: E402
-from align import alignment_legs_driver, alignment_measure, alignment_reference  # noqa: E402
+from align import (DEFAULT_TOL, alignment_legs_driver, alignment_measure,  # noqa: E402
+                   alignment_reference)
 from body import (ARM_LIMITS, ARM_REACH, LIMITS, ArmController, Driver,  # noqa: E402
                   LegStepper, PosePreparer, Posture, Ramp, robot_state, scale)
 from protocol import AXES, ARM_AXES, Message, bounded_number, parse_message  # noqa: E402
@@ -142,9 +143,12 @@ def build_parser():
     for flag, default, low, high, help_text in (
             ("align-turn", 40, 10, 60, "turn speed for alignment (probe: ~0.8 deg/s per unit)"),
             ("align-walk", 12, 4, 20, "forward/back speed for alignment"),
-            ("tol-u", 0.04, 0.01, 0.2, "aligned when the box centre is this close (image width)"),
-            ("tol-h", 0.08, 0.02, 0.3, "aligned when the box size is this close (fraction)"),
-            ("tol-v", 0.05, 0.01, 0.2, "allowed vertical difference before 'view mismatch'"),
+            ("tol-u", DEFAULT_TOL["u"], 0.01, 0.2,
+             "aligned when the box centre is this close (image width)"),
+            ("tol-h", DEFAULT_TOL["h"], 0.02, 0.3,
+             "aligned when the box size is this close (fraction)"),
+            ("tol-v", DEFAULT_TOL["v"], 0.01, 0.2,
+             "allowed vertical difference before 'view mismatch'"),
             ("align-max-moves", 25, 5, 100, "give up after this many alignment moves"),
             ("align-max-seconds", 45, 10, 180, "give up after this long aligning")):
         parser.add_argument(

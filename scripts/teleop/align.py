@@ -21,6 +21,8 @@ from heading import angle_diff  # noqa: F401  (also used by callers as align.ang
 from teach import write_json_atomic
 
 CALIBRATION_VERSION = 2
+# Used in the successful 2026-10-26 pickup; repeatability across positions is unmeasured.
+DEFAULT_TOL = {"u": 0.02, "h": 0.04, "v": 0.025}
 
 
 def errors(features, reference):
@@ -109,7 +111,9 @@ class Observer:
         self.misses = 0
         if self.previous is not None and agree(self.previous, features):
             pair = (self.previous, features)
-            return "ok", {key: (pair[0][key] + pair[1][key]) / 2 for key in ("u", "v", "h")}
+            averaged = {key: (pair[0][key] + pair[1][key]) / 2 for key in ("u", "v", "h")}
+            averaged["samples"] = pair  # final acceptance checks each frame, not just its mean
+            return "ok", averaged
         self.previous = features
         return None
 
@@ -124,12 +128,19 @@ class GyroAligner:
 
     DEAD = 0.5  # gait start-up before a command moves anything (probe: 0.5-0.7 s)
     CAL_TURN = 15.0  # degrees for the one-off calibration turn
-    MIN_TURN = 3.0  # smaller corrections cannot be executed reliably
-    MIN_WALK, MAX_WALK = 0.3, 2.5  # seconds of actual walking per segment
+    MIN_TURN = 3.0  # minimum useful motion for validating calibration
+    MIN_CORRECTION = 1.0  # quarter-speed request; not an independently calibrated turn resolution
+    MAX_CORRECTION = 12.0  # re-observe rather than risk a large turn from a poor visual scale
+    MIN_WALK, MAX_WALK = 0.15, 2.5  # actual walking, in addition to learned gait start-up
     FINE_AMOUNT = 0.5  # half speed when a full-speed segment would be too short
     # Small turns at half speed: at full speed a turn keeps going ~5 deg after the stop, so
     # 5-6 deg corrections turned 10-11 deg and swung back and forth (2026-10-23).
     FINE_TURN = 12.0
+    PRECISE_TURN = 6.0
+    PRECISE_AMOUNT = 0.25
+    PRECISE_WALK_ERROR = 0.15
+    CONFIRM_LOOKS = 3
+    CONFIRM_GAP = 0.25  # fresh, stopped looks spread out before handing over to replay
     TURN_RATE = 0.8  # deg/s per unit of turn speed (probe), only for turn deadlines
     DRIFT_WAIT = 6.0  # seconds to wait for heading hold's drift estimate before giving up
     TOO_BIG = 2.5  # a "box" this many times the reference height is something else
@@ -157,7 +168,7 @@ class GyroAligner:
         self.recalibrate = recalibrate
         self.settle = settle
         self.speeds = speeds or {"turn": 40, "forward": 12}
-        self.tol = tol or {"u": 0.04, "h": 0.08, "v": 0.05}
+        self.tol = dict(DEFAULT_TOL if tol is None else tol)
         self.max_seconds = max_seconds
         self.max_moves = max_moves
         self.prepare_settle = prepare_settle
@@ -219,7 +230,9 @@ class GyroAligner:
         self.calibration = calibration
         self.active, self.started, self.moves = True, now, 0
         self.walk_rate = None  # how fast 1/h falls per second of full-speed forward walking
-        self.lead = {1.0: 1.0, self.FINE_AMOUNT: 1.0}  # degrees turned after a stop, by speed
+        self.lead = {1.0: 1.0, self.FINE_AMOUNT: 1.0, self.PRECISE_AMOUNT: 0.5}
+        self.turn_gain = 1.0  # reduced when a settled correction crosses the target column
+        self.precision_reversals = 0
         self.prev_norm, self.grow, self.in_tol, self.lost = None, 0, 0, 0
         self.last_move, self.last_display = None, None
         self.drift_wait = None
@@ -254,6 +267,8 @@ class GyroAligner:
         direction = 1 if degrees_left > 0 else -1
         target = abs(degrees_left)
         amount = self.FINE_AMOUNT if target < self.FINE_TURN and self.calibration else 1.0
+        if target < self.PRECISE_TURN and self.calibration:
+            amount = self.PRECISE_AMOUNT
         rate = self.TURN_RATE * self.speeds["turn"] * amount
         self.turn = {"start": start, "direction": direction, "target": target, "fails": 0,
                      "began": now, "bias": self.drift() or 0.0, "amount": amount,
@@ -474,6 +489,23 @@ class GyroAligner:
         """Update the turn lead and walking rate from what the last move actually did."""
         if self.last_move is None:
             return
+        if self.last_move[0] != "turn":
+            self.precision_reversals = 0
+        if self.last_move[0] == "turn":
+            before = self.previous["u"] - self.ref["u"]
+            after = value["u"] - self.ref["u"]
+            if before * after < 0 and abs(after) > self.tol["u"]:
+                self.turn_gain = max(0.2, self.turn_gain * 0.5)
+                self.precision_reversals = (self.precision_reversals + 1
+                                            if self.last_move[2] <= self.MIN_CORRECTION else 0)
+                if self.precision_reversals >= 2:
+                    self.abort("minimum turn still overshoots the alignment tolerance; "
+                               "finer motion needs calibration")
+                    return False
+                self.log("ALIGN: turn crossed the target; correction gain {:.2f}.".format(
+                    self.turn_gain))
+            else:
+                self.precision_reversals = 0
         if self.last_move[0] == "turn" and self.turn.get("at_stop", 0.0) >= 1.0:
             yaw = self.yaw()  # learn the coast only from turns that really moved
             if yaw is not None:
@@ -532,6 +564,7 @@ class GyroAligner:
             self.abort(f"not aligned after {self.max_seconds:.0f} s")
             return
         if status == "lost":
+            self.in_tol = 0
             if self.overshot(value, now):
                 return
             self.lost += 1
@@ -542,6 +575,7 @@ class GyroAligner:
             return
         reason = self.implausible(value)
         if reason:
+            self.in_tol = 0
             status, value = "lost", reason
             self.lost += 1
             if self.lost >= 3:
@@ -561,14 +595,18 @@ class GyroAligner:
                 self.abort("view mismatch: the box is the right size but at a different height "
                            "in the image (check kneel, arm, floor and box)")
                 return
-            self.in_tol += 1
-            if self.in_tol >= 2:
+            samples = value.get("samples", (value,))
+            precise = all(within(errors(sample, self.ref), self.tol)
+                          and abs(sample["v"] - self.ref["v"]) <= self.tol["v"]
+                          for sample in samples)
+            self.in_tol = self.in_tol + 1 if precise else 0
+            if self.in_tol >= self.CONFIRM_LOOKS:
                 self.legs.stop()
                 self.phase = "aligned"
-                self.log("ALIGNED (eu={:+.2f} eh={:+.2f}) - release A, then press Y".format(
-                    eu, eh))
+                self.log("ALIGNED (eu={:+.3f} eh={:+.3f} ev={:+.3f}; {} settled looks) "
+                         "- release A, then press Y".format(eu, eh, ev, self.in_tol))
                 return
-            self.observer.begin(now)
+            self.observer.begin(now + self.CONFIRM_GAP)
             return
         self.in_tol = 0
         norm = math.hypot(eu, eh)
@@ -584,17 +622,20 @@ class GyroAligner:
             self.abort(f"not aligned after {self.max_moves} moves")
             return
         if abs(eu) > self.tol["u"]:
-            degrees = -eu * self.calibration["deg_per_u"]  # box right of target: turn right
-            if abs(degrees) < self.MIN_TURN:
-                degrees = math.copysign(self.MIN_TURN, degrees)
-            self.log("ALIGN {}: eu={:+.2f} eh={:+.2f} -> turn {} {:.0f} deg".format(
+            degrees = -eu * self.calibration["deg_per_u"] * self.turn_gain
+            degrees = max(-self.MAX_CORRECTION, min(self.MAX_CORRECTION, degrees))
+            if abs(degrees) < self.MIN_CORRECTION:
+                degrees = math.copysign(self.MIN_CORRECTION, degrees)
+            self.log("ALIGN {}: eu={:+.3f} eh={:+.3f} -> turn {} {:.1f} deg".format(
                 self.moves, eu, eh, "left" if degrees > 0 else "right", abs(degrees)))
             self.start_turn(degrees, now)
             return
         direction, seconds, amount = self.plan_walk(value["h"], eh)
-        self.log("ALIGN {}: eu={:+.2f} eh={:+.2f} -> walk {} {:.1f} s{}".format(
+        speed_label = {1.0: "", self.FINE_AMOUNT: " (half speed)",
+                       self.PRECISE_AMOUNT: " (quarter speed)"}[amount]
+        self.log("ALIGN {}: eu={:+.3f} eh={:+.3f} -> walk {} {:.2f} s{}".format(
             self.moves, eu, eh, "forward" if direction > 0 else "back", seconds,
-            " (half speed)" if amount < 1 else ""))
+            speed_label))
         self.start_walk(direction, seconds, amount, now)
 
     def plan_walk(self, h, eh):
@@ -608,10 +649,9 @@ class GyroAligner:
         seconds = abs(needed) * 0.9  # undershoot slightly; the next look corrects
         if direction > 0 and self.max_forward is not None:
             seconds = min(seconds, self.max_forward)
-        amount = 1.0
-        if seconds < self.MIN_WALK * 2:  # too short at full speed: walk slower instead
-            amount = self.FINE_AMOUNT
-            seconds /= amount
+        amount = (self.PRECISE_AMOUNT if abs(eh) < self.PRECISE_WALK_ERROR else
+                  self.FINE_AMOUNT if seconds < self.MIN_WALK * 2 else 1.0)
+        seconds /= amount
         return direction, max(self.MIN_WALK, min(self.MAX_WALK, seconds)), amount
 
 
