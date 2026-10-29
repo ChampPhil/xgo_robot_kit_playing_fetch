@@ -143,6 +143,20 @@ When enabled, readbacks must agree with visual evidence; missing/contradictory d
 
 ## Later live use (not run during this implementation)
 
+Turn a finished teleop recording into a named workcell asset (read-only on the recording;
+validated for its role; never overwrites; leaves `validated` false; creates the workcell from
+the example if it does not exist yet):
+
+```bash
+python3 scripts/stacking/stack_boxes.py --import-recording ~/xgo_teach/20261029-101500 \
+  --asset pick-purple --config ~/xgo_teach/stacking/workcell.json
+```
+
+Assets: `survey`, `carry-check`, `pick-<color>` (also copies its start reference),
+`retry-<color>` and `layer-<0..2>/<to-stack|place|inspect|return|recover-drop>`. A recording
+with an unknown (null) arm start is refused: set an explicit arm pose before pressing X. The
+proven 2026-10-15 purple pickup has such a start, so it cannot be imported as is.
+
 While teaching, list everything still missing, invalid or unreviewed in one pass (read-only,
 no camera or motors; exit 0 only when the workcell is complete):
 

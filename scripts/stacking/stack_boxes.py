@@ -27,6 +27,8 @@ def parser():
     modes.add_argument("--observe", action="store_true", help="camera/image only; no motors")
     modes.add_argument("--simulate", action="store_true", help="synthetic three-box tower; no hardware")
     modes.add_argument("--check-config", action="store_true", help="validate all taught assets; no hardware")
+    modes.add_argument("--import-recording", type=Path, metavar="SESSION",
+                       help="copy a teleop recording into the workcell as --asset; no hardware")
     modes.add_argument("--setup-report", action="store_true",
                        help="list everything still missing or invalid in the workcell; no hardware")
     modes.add_argument("--execute", action="store_true", help="supervised live run through SSH heartbeat")
@@ -50,6 +52,8 @@ def parser():
     p.add_argument("--yes", action="store_true", help="operator already confirmed the printed live checklist")
     p.add_argument("--workdir", default="~/xgo_teach/stacking")
     p.add_argument("--log", type=Path, help="append phase/evidence JSONL (no video recording)")
+    p.add_argument("--asset", help="import target: survey, carry-check, pick-<color>, "
+                   "retry-<color> or layer-<0..2>/<to-stack|place|inspect|return|recover-drop>")
     p.add_argument("--target", choices=(*COLORS, "marker"), default="marker",
                    help="reference capture target")
     p.add_argument("--pose-file", type=Path,
@@ -254,6 +258,14 @@ def main(argv=None):
             result = Tower(backend, args.order, args.attempts,
                            lambda event: emit(dict(event, mode="simulation"))).run()
             emit(dict(result, mode="simulation", physical_success=False))
+            return 0
+        if args.import_recording:
+            from importer import import_recording
+
+            if not args.asset:
+                raise ValueError("--import-recording needs --asset")
+            emit(dict(import_recording(args.import_recording, args.asset, args.config,
+                                       perception), mode="import", motion_sent=False))
             return 0
         if args.setup_report:
             from profiles import setup_report
