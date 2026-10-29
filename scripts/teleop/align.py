@@ -517,10 +517,14 @@ class GyroAligner:
             change = (1.0 / self.previous["h"] - 1.0 / value["h"]) * self.walk["direction"]
             expected = (self.walk_rate or 0.0) * walked
             relative = abs(value["h"] - self.previous["h"]) / self.previous["h"]
-            if relative < self.NO_MOTION or change < 0.25 * expected:
+            # quarter-speed final steps change the size ~4-5%, too close to camera noise to
+            # tell a step that did not start
+            started = self.walk["amount"] < self.FINE_AMOUNT or (
+                relative >= self.NO_MOTION and change >= 0.25 * expected)
+            if not started:
                 return self.walk_did_not_start()
             rate = change / walked
-            if rate > 0:
+            if rate > 0 and self.walk["amount"] >= self.FINE_AMOUNT:
                 self.walk_rate = rate if self.walk_rate is None else 0.5 * (self.walk_rate + rate)
         return True
 
@@ -666,7 +670,9 @@ def alignment_legs_driver(driver):
 # Hue of the purple box varies with the light: 103-118 in brighter room light (2026-10-21),
 # >= 115 in the dim recording, up to ~175 far away. 105 overlaps light-blue (85-110), fine for
 # a single-box fetch; 170 stops short of red (170-179 and 0-10).
-ALIGN_PURPLE = ((105, 40, 25), (170, 255, 255))
+# Bright floor reads H106 S48 V135 (2026-10-23) and passed as a "too close" box; the far box
+# in dim light reads S55-62 V~40. So pale purple counts only when it is also dark.
+ALIGN_PURPLE = [((105, 60, 25), (170, 255, 255)), ((105, 40, 25), (170, 255, 90))]
 # Kneeling just too close, the box is a wide strip cut off by the bottom edge, which the
 # detector's shape filter drops (125x45 px measured 2026-10-21): report it as too close.
 TOO_CLOSE = "box cut off at the bottom of the view (too close)"
@@ -702,10 +708,10 @@ def alignment_measure(color):
 def cut_off_at_bottom(frame, hsv_range):
     """A large blob of the colour touching the bottom edge of the image."""
     import cv2  # type: ignore[import-not-found]
-    import numpy as np
+    from detect_boxes import color_mask
 
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array(hsv_range[0]), np.array(hsv_range[1]))
+    mask = color_mask(hsv, hsv_range)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     height = frame.shape[0]
     for contour in contours:

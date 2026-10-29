@@ -38,6 +38,18 @@ class BoxDetectionTests(unittest.TestCase):
         self.assertTrue(all(len(detections[color]) == 1 for color in ORDER))
         self.assertTrue(all(item["area_px"] >= 150 for item in result["observed_order"]))
 
+    def test_a_colour_can_combine_several_ranges(self):
+        hsv = np.full((240, 320, 3), (0, 0, 35), dtype=np.uint8)
+        cv2.rectangle(hsv, (20, 80), (60, 120), (140, 200, 210), -1)  # vivid
+        cv2.rectangle(hsv, (200, 80), (240, 120), (140, 50, 40), -1)  # pale but dark
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        vivid = ((130, 100, 25), (150, 255, 255))
+        pale_dark = ((130, 40, 25), (150, 255, 90))
+        found = detect_boxes.detect_boxes(frame, ranges={"purple": [vivid, pale_dark]})
+        self.assertEqual(sorted(box["bbox"][0] for box in found["purple"]), [20, 200])
+        self.assertEqual(len(detect_boxes.detect_boxes(frame, ranges={"purple": vivid})["purple"]),
+                         1)
+
     def test_missing_or_duplicate_box_never_produces_an_order(self):
         missing = detect_boxes.evaluate(detect_boxes.detect_boxes(scene(ORDER[:2])), ORDER)
         self.assertEqual(missing["status"], "missing")

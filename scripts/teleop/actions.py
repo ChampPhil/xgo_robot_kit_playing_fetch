@@ -117,7 +117,7 @@ class Fetcher:
             active, aligned = self.align_status()
             if aligned:
                 self.aligner.update(False, False)  # hand the robot over to the replay
-                self.teach.start_replay()
+                self.teach.start_replay(fetch=True)
                 if not self.teach.replayer.active:
                     self.end("FETCH stopped: the pickup replay could not start")
                     return False

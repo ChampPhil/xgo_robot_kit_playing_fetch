@@ -105,6 +105,8 @@ def build_parser():
                         help="box colour for the recording reference (default: purple)")
     parser.add_argument("--teach-dir", default=str(Path.home() / "xgo_teach"),
                         help="where recordings are stored (default: ~/xgo_teach)")
+    parser.add_argument("--record-motion-only", action="store_true",
+                        help="X teaches routes without requiring a box; no video dataset or fetch reference")
     parser.add_argument(
         "--record-fps", type=lambda v: bounded_number(v, minimum=1, maximum=30, label="record-fps"),
         default=10, metavar="FPS", help="dataset frames per second (1–30; default: 10)")
@@ -386,7 +388,8 @@ def main(argv=None):
         recorder = teach_module.Recorder(Path(args.teach_dir).expanduser(), cam, detect_boxes,
                                          args.color, fps=args.record_fps,
                                          min_free_mb=args.min_free_mb,
-                                         min_sharpness=args.min_sharpness)
+                                         min_sharpness=args.min_sharpness,
+                                         motion_only=args.record_motion_only)
         import heading
 
         hold = heading.HeadingHold(

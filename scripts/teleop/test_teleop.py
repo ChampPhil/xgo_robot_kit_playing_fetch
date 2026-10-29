@@ -183,10 +183,12 @@ class SenderTests(unittest.TestCase):
     def test_receiver_options_pass_through(self):
         args = sender.build_parser().parse_args(
             ["--color", "orange", "--settle", "1", "--align-motion", "--recalibrate",
-             "--align-turn", "35", "--tol-u", "0.03"])
+             "--align-turn", "35", "--tol-u", "0.03", "--record-motion-only",
+             "--teach-dir", "~/xgo_teach/routes"])
         command = sender.remote_command(args)
         for part in ("--color orange", "--settle 1", "--align-motion", "--recalibrate",
-                     "--align-turn 35", "--tol-u 0.03"):
+                     "--align-turn 35", "--tol-u 0.03", "--record-motion-only",
+                     "--teach-dir '~/xgo_teach/routes'"):
             self.assertIn(part, command)
         plain = sender.remote_command(sender.build_parser().parse_args([]))
         self.assertNotIn("--align-motion", plain)
@@ -739,8 +741,8 @@ class ReceiverTests(unittest.TestCase):
         self.replaying = {"on": False}
         self.teach = SimpleNamespace(busy=False, replayer=SimpleNamespace(active=False))
 
-        def start_replay():  # like TeachController: the replay is running on return
-            self.events.append("replay")
+        def start_replay(fetch=False):  # like TeachController: the replay runs on return
+            self.events.append("replay" if fetch else "replay-latest")
             self.replaying["on"] = True
             self.teach.replayer.active = True
 
@@ -775,7 +777,7 @@ class ReceiverTests(unittest.TestCase):
 
     def test_fetch_stops_if_the_replay_cannot_start(self):
         fetcher = self.make_fetcher()
-        self.teach.start_replay = lambda: self.events.append("no recording")
+        self.teach.start_replay = lambda fetch=False: self.events.append("no recording")
         self.fetch_tick(fetcher, 1)
         self.fetch_tick(fetcher, 1, seconds=2.0)
         self.align_state["aligned"] = True
@@ -923,6 +925,18 @@ class ReceiverTests(unittest.TestCase):
         features, reason = receiver.alignment_measure("purple")(frame)
         self.assertIsNone(features)
         self.assertEqual(reason, align.TOO_CLOSE)
+
+    def test_alignment_ignores_bright_floor_with_a_blue_tint(self):
+        import cv2
+        import numpy as np
+
+        # measured 2026-10-23: bright floor read H106 S48 V135 and passed as a "too close" box
+        hsv = np.full((480, 640, 3), (106, 48, 135), dtype=np.uint8)
+        cv2.rectangle(hsv, (346, 271), (360, 287), (130, 90, 60), -1)  # the box, far away
+        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        features, reason = receiver.alignment_measure("purple")(frame)
+        self.assertIsNone(reason)
+        self.assertEqual(features["bbox"][:2], [346, 271])
 
     def test_alignment_ignores_red(self):
         import cv2

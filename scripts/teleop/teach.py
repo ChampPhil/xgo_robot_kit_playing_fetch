@@ -86,7 +86,7 @@ def write_json_atomic(path, data):
 class Recorder:
     def __init__(self, root, camera, detect, color, fps=10, min_free_mb=200,
                  clock=time.monotonic, free_mb=None, now=datetime.now, encode=None,
-                 sharpness=None, min_sharpness=50):
+                 sharpness=None, min_sharpness=50, motion_only=False):
         self.root = Path(root)
         self.camera = camera
         self.detect = detect
@@ -99,6 +99,7 @@ class Recorder:
         self.encode = encode or encode_jpeg
         self.sharpness = sharpness or laplacian_sharpness
         self.min_sharpness = min_sharpness
+        self.motion_only = motion_only
         self.session = None
 
     @property
@@ -140,9 +141,14 @@ class Recorder:
         if sharpness < self.min_sharpness:
             return (f"camera image is blurry (sharpness {sharpness:.0f} < {self.min_sharpness:.0f}"
                     "; hold still)")
-        features, reason = box_features(self.detect(frame), self.color, frame.shape)
-        if reason:
-            return reason
+        features = None
+        if self.motion_only:
+            if state.get("arm") is None:
+                return "set an explicit arm pose before recording a motion-only route"
+        else:
+            features, reason = box_features(self.detect(frame), self.color, frame.shape)
+            if reason:
+                return reason
         files = []
         try:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -154,7 +160,7 @@ class Recorder:
             (session / "reference.jpg").write_bytes(self.encode(frame))
             write_json_atomic(session / "reference.json", {
                 "version": 1, "color": self.color, "features": features, "state": state,
-                "sharpness": round(sharpness, 1),
+                "sharpness": round(sharpness, 1), "motion_only": self.motion_only,
                 "created": self.now().isoformat(timespec="seconds")})
             files.append(open(session / "motion_events.jsonl", "a"))
             files.append(open(session / "dataset.jsonl", "a"))
@@ -203,6 +209,8 @@ class Recorder:
         if reason:
             self.stopped_summary = self.stop()
             return reason
+        if self.motion_only:
+            return None  # route teaching stores commands and one reference, not a video dataset
         frame, stamp, _ = self.fresh_frame()
         if frame is None or stamp == self.last_stamp:
             return None
@@ -260,6 +268,30 @@ def latest_session(root):
     return finished[-1] if finished else None
 
 
+def box_reference(session):
+    """reference.json data of a box recording (a fetch target), or None (route, damaged)."""
+    try:
+        data = json.loads((session / "reference.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("motion_only") or not isinstance(
+            data.get("features"), dict):
+        return None
+    return data
+
+
+def fetch_session(root):
+    """Newest finished box recording: route recordings never hide the pickup from fetch."""
+    root = Path(root)
+    if not root.is_dir():
+        return None
+    finished = sorted(path for path in root.iterdir() if (path / "motion.json").is_file())
+    for session in reversed(finished):
+        if box_reference(session) is not None:
+            return session
+    return None
+
+
 def valid_walk(steps):
     return (isinstance(steps, dict) and set(steps) == set(WALK_AXES)
             and all(isinstance(steps[axis], int) and not isinstance(steps[axis], bool)
@@ -287,16 +319,13 @@ def load_motion(session):
 
 
 def load_reference(root):
-    """{"features", "state"} from the latest finished recording's reference.json, or None."""
-    session = latest_session(root)
+    """{"features", "state"} from the newest box recording's reference.json, or None."""
+    session = fetch_session(root)
     if session is None:
         return None
-    try:
-        data = json.loads((session / "reference.json").read_text())
-        return {"features": data["features"], "state": data.get("state") or {},
-                "image": session / "reference.jpg"}
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+    data = box_reference(session)
+    return {"features": data["features"], "state": data.get("state") or {},
+            "image": session / "reference.jpg"}
 
 
 class Replayer:
@@ -481,11 +510,12 @@ class TeachController:
             self.pending["reason"] = reason
             self.log(f"Not ready to record yet: {reason} (retrying).")
 
-    def start_replay(self):
+    def start_replay(self, fetch=False):
+        """Y replays the newest recording; fetch replays the pickup it aligned to."""
         if self.recorder.active or self.pending is not None:
             self.log("Replay button ignored while recording.")
             return
-        session = latest_session(self.root)
+        session = (fetch_session if fetch else latest_session)(self.root)
         if session is None:
             self.log(f"No recording in {self.root} yet; press X to record one.")
             return

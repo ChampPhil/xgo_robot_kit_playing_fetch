@@ -114,6 +114,25 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(reference["state"], STATE)
         self.assertEqual((self.session() / "reference.jpg").read_bytes(), b"jpeg")
 
+    def test_motion_only_records_route_without_box_or_video_and_is_not_a_fetch_reference(self):
+        self.recorder.motion_only = True
+        self.seen = detections()
+        self.assertIsNone(self.recorder.start(STATE))
+        self.clock.now += 0.5
+        self.recorder.on_send("walk", {"x": 6, "y": 0, "yaw": 0})
+        self.recorder.tick({}, STATE)
+        summary = self.recorder.stop()
+        self.assertEqual(summary["frames"], 0)
+        self.assertEqual(summary["events"], 1)
+        self.assertEqual(list((self.session() / "frames").iterdir()), [])
+        self.assertIsNone(teach.load_reference(self.root))
+        self.assertEqual(teach.load_motion(self.session())["events"][0]["walk"]["x"], 6)
+
+    def test_motion_only_refuses_unknown_arm_start(self):
+        self.recorder.motion_only = True
+        self.assertIn("explicit arm", self.recorder.start(dict(STATE, arm=None)))
+        self.assertFalse(self.recorder.active)
+
     def test_start_refuses_stale_frame_and_low_disk(self):
         self.clock.now += 5
         self.assertIn("stale", self.recorder.start(STATE))
@@ -454,7 +473,26 @@ class ReferenceTests(unittest.TestCase):
             self.assertEqual(reference["features"]["u"], 0.6)
             self.assertEqual(reference["state"]["arm"], [80, 30])
             (root / "20261005-120000" / "reference.json").write_text("{broken")
+            # fetch falls back to the newest usable pickup (and replays that same session)
+            self.assertEqual(teach.load_reference(root)["features"]["u"], 0.3)
+            (root / "20261005-110000" / "reference.json").write_text("{broken")
             self.assertIsNone(teach.load_reference(root))
+
+    def test_a_newer_route_recording_does_not_hide_the_pickup_from_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pickup, route = root / "20261005-110000", root / "20261005-120000"
+            for session, data in ((pickup, {"version": 1, "features": {"u": 0.4, "v": 0.5,
+                                                                        "h": 0.2},
+                                            "state": STATE}),
+                                  (route, {"version": 1, "motion_only": True, "features": None,
+                                           "state": STATE})):
+                session.mkdir()
+                (session / "motion.json").write_text(json.dumps(MOTION))
+                (session / "reference.json").write_text(json.dumps(data))
+            self.assertEqual(teach.load_reference(root)["features"]["u"], 0.4)
+            self.assertEqual(teach.fetch_session(root), pickup)
+            self.assertEqual(teach.latest_session(root), route)  # Y still replays the route
 
 
 class FakeMessage:
@@ -532,6 +570,18 @@ class ControllerTests(unittest.TestCase):
         self.teach.update(FakeMessage(record=2), manual=False)
         self.assertFalse(self.recorder.active)
         self.assertTrue(any("3 frames" in line for line in self.log))
+
+    def test_fetch_replays_the_pickup_not_a_newer_route(self):
+        self.save_motion()
+        (self.root / "20261005-120000" / "reference.json").write_text(json.dumps(
+            {"version": 1, "features": {"u": 0.5, "v": 0.5, "h": 0.2}, "state": STATE}))
+        route = self.root / "20261005-130000"
+        route.mkdir()
+        (route / "motion.json").write_text(json.dumps(MOTION))
+        (route / "reference.json").write_text(json.dumps({"version": 1, "motion_only": True}))
+        self.teach.start_replay(fetch=True)
+        self.assertTrue(self.replayer.active)
+        self.assertTrue(any("20261005-120000" in line for line in self.log), self.log)
 
     def test_record_refusal_is_reported(self):
         self.recorder.reason = "no purple box in view"

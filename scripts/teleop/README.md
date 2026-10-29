@@ -146,6 +146,12 @@ Recording refuses to start unless exactly one box of `--color` (default purple) 
 and stops by itself when free disk drops below `--min-free-mb` (200). At 640×480 a minute of
 recording takes roughly 15–20 MB.
 
+For carry/place/return teaching without a box in view, add **`--record-motion-only`** and a
+separate **`--teach-dir`** to the sender. X then saves motion commands and one reference image
+without a video dataset; set an explicit arm pose first. Such recordings cannot become
+automatic F/Space alignment targets. See [the stacking guide](../stacking/README.md) for named
+routes, stationary verification poses, and separate 0/25/50 mm placement recordings.
+
 ## Aligning with the box (hold A, or F = fetch)
 
 Alignment moves the robot back to where the latest recording's first frame was taken, so the

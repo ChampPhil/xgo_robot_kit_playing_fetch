@@ -530,6 +530,19 @@ class GyroAlignerTests(Harness):
         self.assertEqual([kneel for kneel, _ in self.pose.calls], [1.0, 0.5, 0.0])
         self.assertTrue(self.said("any posture"), self.log)
 
+    def test_a_quarter_speed_step_with_a_small_size_change_is_not_a_failed_start(self):
+        # final steps change the box size by ~4-5%; camera noise can read under 3%
+        self.make()
+        self.calibrated()
+        self.run_until(3)
+        aligner = self.aligner
+        aligner.walk_rate, before = 10.0, aligner.walk_dead
+        aligner.walk = {"seconds": 0.4, "direction": 1, "amount": aligner.PRECISE_AMOUNT}
+        aligner.last_move, aligner.previous = ("walk", 1, 0.4), {"u": 0.5, "v": 0.8, "h": 0.22}
+        self.assertTrue(aligner.learn({"u": 0.5, "v": 0.8, "h": 0.224}))
+        self.assertEqual(aligner.walk_dead, before)
+        self.assertFalse(self.said("did not start"), self.log)
+
     def test_legs_going_the_wrong_way_are_stopped(self):
         self.make(legs_sign=-1)
         self.calibrated()
