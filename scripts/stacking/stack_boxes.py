@@ -27,6 +27,8 @@ def parser():
     modes.add_argument("--observe", action="store_true", help="camera/image only; no motors")
     modes.add_argument("--simulate", action="store_true", help="synthetic three-box tower; no hardware")
     modes.add_argument("--check-config", action="store_true", help="validate all taught assets; no hardware")
+    modes.add_argument("--setup-report", action="store_true",
+                       help="list everything still missing or invalid in the workcell; no hardware")
     modes.add_argument("--execute", action="store_true", help="supervised live run through SSH heartbeat")
     modes.add_argument("--make-marker", type=Path, metavar="PNG")
     modes.add_argument("--capture-reference", type=Path, metavar="DIRECTORY",
@@ -253,6 +255,17 @@ def main(argv=None):
                            lambda event: emit(dict(event, mode="simulation"))).run()
             emit(dict(result, mode="simulation", physical_success=False))
             return 0
+        if args.setup_report:
+            from profiles import setup_report
+
+            report = setup_report(args.config, perception)
+            for item in report["items"]:
+                if item["status"] != "ok":
+                    print("%-11s %s%s" % (item["status"], item["item"],
+                                          ": " + item["detail"] if item["detail"] else ""),
+                          file=sys.stderr)
+            emit(dict(report, mode="setup-report", motion_sent=False))
+            return 0 if report["ready"] else 2
         from profiles import Plan
 
         plan = Plan(args.config, perception)  # all assets and validation before motor import

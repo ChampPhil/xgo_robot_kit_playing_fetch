@@ -143,6 +143,18 @@ When enabled, readbacks must agree with visual evidence; missing/contradictory d
 
 ## Later live use (not run during this implementation)
 
+While teaching, list everything still missing, invalid or unreviewed in one pass (read-only,
+no camera or motors; exit 0 only when the workcell is complete):
+
+```bash
+python3 scripts/stacking/stack_boxes.py --setup-report \
+  --config ~/xgo_teach/stacking/workcell.json
+```
+
+Each line is `missing` (file or value not set), `invalid` (with the reason) or `unreviewed`
+(`validated` still false). Cross-checks such as matching poses or disjoint ROIs are reported
+once both sides load. The last stdout line is the full report as JSON.
+
 Validate all files on the Pi first:
 
 ```bash

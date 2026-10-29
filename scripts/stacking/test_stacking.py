@@ -325,6 +325,66 @@ class ProfilesTests(unittest.TestCase):
             hardware.assert_not_called()
 
 
+class SetupReportTests(unittest.TestCase):
+    """--setup-report lists every gap in one pass and never touches hardware."""
+
+    setUp, write = ProfilesTests.setUp, ProfilesTests.write  # the same complete workcell
+
+    def report(self):
+        return profiles.setup_report(self.write("config.json", self.config), Perception())
+
+    def statuses(self, report):
+        return {item["item"]: item["status"] for item in report["items"]}
+
+    def test_complete_profile_is_ready(self):
+        report = self.report()
+        self.assertTrue(report["ready"], [i for i in report["items"] if i["status"] != "ok"])
+        self.assertEqual(set(report["counts"]), {"ok"})
+
+    def test_example_profile_lists_every_gap_without_raising(self):
+        example = Path(stack_boxes.__file__).with_name("stack_config.example.json")
+        report = profiles.setup_report(example, Perception())
+        statuses = self.statuses(report)
+        self.assertFalse(report["ready"])
+        self.assertEqual(statuses["workcell reviewed"], "unreviewed")
+        self.assertEqual(statuses["verification floor_roi"], "missing")
+        self.assertEqual(statuses["layer 2 place motion"], "missing")
+        self.assertEqual(statuses["purple pickup reference"], "missing")
+        self.assertGreaterEqual(report["counts"]["missing"], 20)
+
+    def test_independent_problems_are_all_reported(self):
+        self.config["layers"][2]["to_stack"] = "missing.json"
+        self.config["verification"]["held_roi"] = FLOOR
+        self.config["pickups"]["orange"]["validated"] = False
+        statuses = self.statuses(self.report())
+        self.assertEqual(statuses["layer 2 to_stack motion"], "missing")
+        self.assertEqual(statuses["verification floor/held ROIs disjoint"], "invalid")
+        self.assertEqual(statuses["orange pickup reviewed"], "unreviewed")
+        self.assertEqual(statuses["purple pickup motion"], "ok")
+        self.assertEqual(statuses["layer 1 to_stack motion"], "ok")
+
+    def test_pose_mismatch_is_reported_when_both_sides_load(self):
+        self.write("marker.json", {"state": {"arm": [90, 30], "kneel": 1.0}, "image": "marker.png"})
+        statuses = self.statuses(self.report())
+        self.assertEqual(statuses["layer 0 place/approach/check poses match"], "invalid")
+        self.assertEqual(statuses["layer 0 approach reference"], "ok")
+
+    def test_cli_reports_without_robot(self):
+        path = self.write("config.json", self.config)
+        self.config["validated"] = False
+        bad = self.write("bad-config.json", self.config)
+        with patch.object(robot, "Robot") as hardware:
+            for config, code in ((path, 0), (bad, 2)):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(stack_boxes.main(["--setup-report", "--config", str(config)]),
+                                     code)
+                result = json.loads(out.getvalue().splitlines()[-1])
+                self.assertEqual(result["ready"], code == 0)
+                self.assertFalse(result["motion_sent"])
+            hardware.assert_not_called()
+
+
 class RuntimeTests(unittest.TestCase):
     def controller(self):
         backend = object.__new__(robot.Robot)

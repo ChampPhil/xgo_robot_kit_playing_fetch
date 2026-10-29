@@ -206,3 +206,130 @@ class Plan:
         if value is None:
             raise ValueError("reference must show one unambiguous " + target)
         return {"features": value, "state": state, "image": str(image)}
+
+
+class Report:
+    """Every check of Plan, run independently so one gap does not hide the others."""
+
+    def __init__(self):
+        self.items = []
+
+    def add(self, name, status, detail=""):
+        self.items.append({"item": name, "status": status, "detail": detail})
+
+    def reviewed(self, name, entry):
+        flag = isinstance(entry, dict) and entry.get("validated") is True
+        self.add(name, "ok" if flag else "unreviewed",
+                 "" if flag else "set validated: true only after reviewing it on the robot")
+
+    def check(self, name, function, *args):
+        """Run one check; record ok / missing (file or value not set) / invalid. -> value|None"""
+        if any(arg is None for arg in args):
+            self.add(name, "missing", "not set")
+            return None
+        try:
+            value = function(*args)
+        except FileNotFoundError as exc:
+            self.add(name, "missing", "file not found: " + str(exc.filename))
+        except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+            self.add(name, "invalid", str(exc) or type(exc).__name__)
+        else:
+            self.add(name, "ok")
+            return value
+        return None
+
+    def agree(self, name, values, test, message):
+        """A cross-check, only when every side loaded (otherwise its own item says why)."""
+        if all(value is not None for value in values):
+            self.check(name, lambda: None if test(*values) else _raise(message))
+
+    def result(self):
+        counts = {}
+        for item in self.items:
+            counts[item["status"]] = counts.get(item["status"], 0) + 1
+        return {"ready": set(counts) == {"ok"}, "counts": counts, "items": self.items}
+
+
+def _raise(message):
+    raise ValueError(message)
+
+
+def _disjoint(a, b):
+    return not overlaps(a, b)
+
+
+def setup_report(filename, perception):
+    """Read-only: what is missing or invalid in a workcell, all at once. No motors."""
+    report = Report()
+    filename = Path(filename).expanduser().resolve()
+    data = report.check("workcell file", lambda: json.loads(filename.read_text()))
+    if not isinstance(data, dict):
+        if data is not None:
+            report.add("workcell format", "invalid", "the workcell must be a JSON object")
+        return report.result()
+    plan = object.__new__(Plan)  # only its path/reference/motion loaders
+    plan.filename = filename
+    get = data.get
+    report.check("workcell version", lambda: None if get("version") == 1 else _raise(
+        "version must be 1"))
+    report.reviewed("workcell reviewed", data)
+    report.check("marker id", lambda: None if type(get("marker_id")) is int and
+                 get("marker_id") == perception.marker_id else _raise(
+                     "marker ID does not match the perception dictionary"))
+    report.check("survey floor_roi", roi, get("survey_floor_roi"))
+    for index, value in enumerate(get("survey_exclude_rois") or []):
+        report.check("survey exclude_roi %d" % index, roi, value)
+    report.check("survey motion", plan.motion, get("survey_motion"), "survey")
+
+    verify = get("verification") if isinstance(get("verification"), dict) else {}
+    report.reviewed("verification reviewed", verify)
+    floor = report.check("verification floor_roi", roi, verify.get("floor_roi"))
+    held = report.check("verification held_roi", roi, verify.get("held_roi"))
+    report.agree("verification floor/held ROIs disjoint", (floor, held), _disjoint,
+                 "floor and held ROIs must be disjoint in the taught check pose")
+    check = report.check("verification check motion", plan.motion, verify.get("motion"), "check")
+
+    pickups = get("pickups") if isinstance(get("pickups"), dict) else {}
+    for color in COLORS:
+        entry = pickups.get(color) if isinstance(pickups.get(color), dict) else {}
+        name = color + " pickup"
+        report.reviewed(name + " reviewed", entry)
+        reference = report.check(name + " reference", plan.reference, entry.get("reference"),
+                                 perception, color)
+        motion = report.check(name + " motion", plan.motion, entry.get("motion"), "pick")
+        report.check(name + " retry motion", plan.motion, entry.get("retry"), "recover")
+        report.agree(name + " start matches reference pose", (motion, reference),
+                     lambda m, r: start_pose(m) == r["state"],
+                     "pickup start differs from its alignment reference pose")
+
+    layers = get("layers") if isinstance(get("layers"), list) else []
+    if len(layers) != 3:
+        report.add("layers", "invalid", "three separately taught layer profiles are required")
+    for index in range(3):
+        entry = layers[index] if index < len(layers) and isinstance(layers[index], dict) else {}
+        name = "layer %d" % index
+        report.reviewed(name + " reviewed", entry)
+        height = entry.get("height_mm")
+        report.check(name + " height", lambda: None if not isinstance(height, bool) and
+                     height == index * 25 else _raise("height_mm must be %d" % (index * 25)))
+        loaded = {key: report.check("%s %s motion" % (name, key), plan.motion, entry.get(key),
+                                    role)
+                  for key, role in (("to_stack", "carry"), ("place", "place"),
+                                    ("inspect", "inspect"), ("return", "return"),
+                                    ("recover_drop", "recover"))}
+        approach = report.check(name + " approach reference", plan.reference,
+                                entry.get("reference"), perception, "marker")
+        inspection = report.check(name + " inspection reference", plan.reference,
+                                  entry.get("inspect_reference"), perception, "marker")
+        report.agree(name + " place/approach/check poses match",
+                     (loaded["place"], approach, check),
+                     lambda p, a, c: start_pose(p) == a["state"] == end_pose(c),
+                     "place start, marker approach, and held-check pose must match")
+        report.agree(name + " inspection pose matches", (loaded["inspect"], inspection),
+                     lambda m, r: end_pose(m) == r["state"],
+                     "tower inspection pose differs from its marker reference")
+        stack = report.check(name + " stack_roi", roi, entry.get("stack_roi"))
+        held = report.check(name + " held_roi", roi, entry.get("held_roi"))
+        report.agree(name + " stack/held ROIs disjoint", (stack, held), _disjoint,
+                     "stack and held verification ROIs must be disjoint")
+    return report.result()
