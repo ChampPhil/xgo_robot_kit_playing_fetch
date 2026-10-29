@@ -1,6 +1,9 @@
 # XGO Lite project: plan, progress and daily log
 
-Last updated 2026-10-26. Code: `scripts/teleop/` (see its README "Code map"); robot checkout
+Latest continuation handoff: [HANDOFF-2026-10-29.md](HANDOFF-2026-10-29.md). Read it first for
+the interrupted setup work, newer uncommitted edits and latest disk/connectivity observations.
+
+Last updated 2026-10-29. Code: `scripts/teleop/` and `scripts/stacking/`; robot checkout
 `~/project/xgo_robot_kit_playing_fetch` last verified at `da99946` on 2026-10-26.
 Precision changes described below were deployed as a patch over that commit on 2026-10-26;
 240 teleop tests passed on the Pi, followed by a user-confirmed pickup with the new version.
@@ -10,7 +13,15 @@ Precision changes described below were deployed as a patch over that commit on 2
 **Long term:** the robot finds coloured 25 mm blocks anywhere in view, picks the requested
 colour and stacks them at a marked spot in a requested bottom-to-top order.
 
-**Current target:** reliable final alignment before pickup. Fetch (F: reset → align → replay)
+**Current target:** three-color pickup, verification and tower sequencing. The new
+`scripts/stacking/stack_boxes.py` supports multi-box observation/tracks, user-selected
+bottom-to-top order, bounded miss/drop retries, marker alignment, separate taught layer
+placements and visual tower verification. It runs end to end on synthetic images and was
+deployed on 2026-10-28, preserving unrelated robot edits. **No live stacking test:**
+carry/place/recovery routes and held/floor/stack verification views still need teaching.
+The user selected a printed marker; an ID-0 PNG is included.
+
+**Existing hardware evidence:** Fetch (F: reset → align → replay)
 completed a user-confirmed pickup on 2026-10-23 in 54 s. An initial 2026-10-26 trial grasped
 the box partially; after precision changes, a requested retry **held and lifted the box** in
 about 55 s. The robot is stopped after that one successful trial; further runs require a new
@@ -31,8 +42,8 @@ motion. Recordings also store video + commands for training a model later.
 | 5 | Align: get back to the recording's first view by itself (hold A / Space) | 🔄 Tighter gate passed one hardware trial | 2026-10-26 new version: eu +0.017 / eh −0.017 / ev +0.010 on three settled observations, followed by a confirmed pickup. More positions need testing |
 | 6 | Fetch: one press = reset → align → replay (F) | 🔄 Two user-confirmed successes across versions; reliability unmeasured | 54 s on 2026-10-23; ~55 s with new precision version on 2026-10-26. Other trials failed or partially grasped. Sequence completion alone is not grasp success |
 | 7 | Walk straight (heading hold) | ⚠️ Built, unproven | It still curved in the one test; gyro drift readings were inconsistent (+6.9, −19, 0 deg/s in different conditions). Alignment no longer depends on it |
-| 8 | Know the grab worked (claw readback / camera check) | ⏳ Not started | Needed before the robot retries on its own |
-| 9 | Stacking: separate pick and place recordings, place height +25 mm per layer, align to the stack spot (marker), sequence the colours | ⏳ Not started | Needs 5–8 first; a printed ArUco marker for the stack spot is recommended |
+| 8 | Know the grab worked (claw readback / camera check) | 🔄 Implemented offline; calibration pending | Positive held-region box plus no floor-region box; ambiguous/missing evidence stops. Optional independently calibrated readback bands. No physical validation yet |
+| 9 | Stacking: separate pick/place recordings, marked spot, requested color sequence | 🔄 Implemented offline; taught assets pending | Multi-box tracks, bounded retries, marker approach, 0/25/50 mm layer profiles, verified color/geometry order before next layer. Simulation is not a physical tower |
 | 10 | Learned models (alignment / pickup) from the recorded dataset | ⏳ Later | Two recordings exist; LeRobot conversion not built |
 
 ## Measured on this robot (use these, don't re-guess)
@@ -83,8 +94,32 @@ motion. Recordings also store video + commands for training a model later.
    was rejected. The user moved it closer before the successful precision-version trial;
    that run does not validate far-box fetching.
 4. Decide on heading hold (keep, fix, or remove) from one straight-walk comparison.
-5. Investigate grasp checking; a claw readback alone has not been validated as contact proof.
-6. Stacking design: named recordings (pick / place), per-layer place height, stack-spot marker.
+5. New stacking setup: print the marker, teach a carry/check view exposing the held box and
+   floor separately, then named carry/place/inspect/return/recovery motions. Use the new
+   `--record-motion-only` option to teach routes without a target box or video dataset.
+6. Validate one layer before adding the 25 and 50 mm support-surface placements. No guessed
+   Cartesian heights, automatic reverse-walking or disappearance-only grasp success.
+
+## Stacking software (2026-10-28, deployed; offline validation only)
+
+- Entry point and instructions: [scripts/stacking/README.md](../scripts/stacking/README.md).
+- `--observe` reports all colors and continuous IDs for unique detections; `--simulate`
+  exercises actual color/marker detectors on synthetic floor/held/tower images.
+- `--execute` is a Mac-to-Pi 20 Hz heartbeat launcher. The Pi checks every taught asset
+  before XGO construction and shares camera/UART across alignment, replay and telemetry.
+- A confirmed floor miss/drop can retry, at most three attempts per color by default.
+  Unknown evidence stops. A placement is committed only after marker-anchored inspection
+  finds the requested visible bottom-to-top order and adjacent aligned faces.
+- The example workcell profile is disabled and has no guessed arm poses or image ROIs.
+  SSH was used to deploy and run synthetic/mock tests; no real camera, XGO constructor,
+  UART or motors were initialized. Existing voice/chase edits were preserved.
+- 308 offline tests pass on Mac and Pi (242 teleop, 41 stacking, 6 movement, 8 detection,
+  11 telemetry), plus local pyflakes and Python 3.9 grammar checks. A Pi OpenCV 4.7 marker
+  grouping difference was reproduced and fixed; marker-size and separate-print ambiguity
+  regressions pass. Existing test resource warnings remain.
+- After deployment/tests completed, SSH timed out on both attempts at the final hash audit
+  and stacking-guide refresh. The local guide is current; the Pi may retain the earlier
+  "not deployed" wording. No physical test or further hardware commands were attempted.
 
 ## Session checklist (every time the robot is used)
 
@@ -119,3 +154,6 @@ motion. Recordings also store video + commands for training a model later.
 | 10-23 | **54 s fetch with user-confirmed pickup.** Turn coasting fix deployed (`da99946`). Follow-up stopped during alignment; floor / chair false detections investigated but no detector fix committed before the Mac slept |
 | 10-26 | Battery 89% before startup; first attempt cancelled by command watchdog. Retry began at 86%, aligned and completed replay in ~51 s from F; user reported **partial grasp / slight miss** and stopped fetching. Receiver exited cleanly, camera/UART free, boot menu remains stopped. Local precision changes developed afterwards; 265 offline tests, pyflakes and Python 3.9 grammar checks pass. Not deployed or hardware-tested |
 | 10-26, precision retry | User requested testing the new version; patch deployed while preserving unrelated robot edits, 240 teleop tests passed on Pi. Initial far box was below detection limits / above floor cutoff, so no fetch ran; user moved it closer. Trial began at 80% battery: 14 alignment moves, eu +0.017 / eh −0.017 / ev +0.010 confirmed across three settled looks, then replay. About 55 s from F; user confirmed **held and lifted**. Receiver stopped cleanly; camera/UART free; boot menu stays stopped. Disk 276 MB free after trial. No repeat trial started |
+| 10-28 | Implemented separate multi-box tower script, fresh-frame tracks, bounded pickup/drop retries, positive visual grip and tower checks, ArUco marker matching/generation, strict named-motion profile validation, one-owner live backend with SSH watchdog, and simulation. Added command-only route teaching. Deployed code with hashes checked and unrelated robot work preserved. Fixed Pi OpenCV 4.7 candidate grouping; all 308 offline tests pass on Pi and Mac. No real camera/UART/motor initialization or physical stacking attempted. Printed marker selected by user; live teaching remains next |
+| 10-29 | Read-only continuation: SSH restored; root disk only 73 MB free. Inspected two existing purple recordings and newer uncommitted teleop edits; 41 local stacking tests passed. Proposed setup report/importer not yet written. User redirected to handoff documentation; see HANDOFF-2026-10-29.md. No physical camera/UART/motor work |
+| 10-29 | Fixes from the 10-23 failed fetch and a review of the 10-26 changes (offline only): bright floor (H106 S48 V135) no longer passes as a "too close" purple box — pale purple now counts only when dark (detector accepts several ranges per colour); quarter-speed final steps no longer count as "walk did not start" or as walking-speed samples; fetch aligns to and replays the newest *box* recording, so a newer route recording cannot hide it (Y still replays the newest). 247 teleop, 41 stacking, 9 detection tests pass. Not yet deployed: the Pi checkout carries copied-in files, so a plain `git pull` would conflict |

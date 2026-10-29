@@ -1,6 +1,10 @@
 # XGO Lite robot experiments
 
-This repository develops camera perception and movement tests toward a fetch-playing robot. The current box detector **only observes** three colored boxes; it does not walk, pick, or stack. Run the tests on a clear, level surface and do not operate the robot while charging.
+This repository develops an XGO Lite robot that fetches colored blocks and, eventually,
+stacks them in a requested order. Single-box teach-and-repeat pickup has worked on hardware.
+The new three-box stacking workflow is implemented and tested offline; its carry/place
+motions and verification views still need teaching before a physical tower run.
+Current evidence and open work are in [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## Getting started
 
@@ -9,6 +13,9 @@ From the repository root, `./setup.sh` creates `.venv/` and installs `requiremen
 - [Colored-box detection](scripts/box_detection/README.md) — camera/photo/video CLI for purple, orange, and light-blue boxes; no motors.
 - [Movement tests](scripts/movement_tests/README.md) — explicit, timed movement CLI; commands motors only after confirmation.
 - [Sensor monitor](scripts/sensor_monitor/README.md) — live, read-only UART telemetry (battery, attitude, joints) in the terminal; requires the built-in menu to release the serial port.
+- [Teleop and pickup](scripts/teleop/README.md) — gamepad/keyboard, recording, alignment and fetch.
+- [Three-box stacking](scripts/stacking/README.md) — multi-box tracking, input color order,
+  bounded retries, grip/tower verification, printed marker, simulation and taught-workcell execution.
 
 For example, with a local photo:
 

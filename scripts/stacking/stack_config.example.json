@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "validated": false,
+  "marker_id": 0,
+  "survey_floor_roi": [0, 0, 1, 1],
+  "survey_exclude_rois": [],
+  "survey_motion": "taught/survey/motion.json",
+  "verification": {
+    "validated": false,
+    "motion": "taught/carry-check/motion.json",
+    "floor_roi": null,
+    "held_roi": null,
+    "grip_raw": null
+  },
+  "pickups": {
+    "purple": {
+      "validated": false,
+      "reference": "taught/pick-purple/reference.json",
+      "motion": "taught/pick-purple/motion.json",
+      "retry": "taught/retry-purple/motion.json"
+    },
+    "orange": {
+      "validated": false,
+      "reference": "taught/pick-orange/reference.json",
+      "motion": "taught/pick-orange/motion.json",
+      "retry": "taught/retry-orange/motion.json"
+    },
+    "light-blue": {
+      "validated": false,
+      "reference": "taught/pick-light-blue/reference.json",
+      "motion": "taught/pick-light-blue/motion.json",
+      "retry": "taught/retry-light-blue/motion.json"
+    }
+  },
+  "layers": [
+    {
+      "validated": false,
+      "height_mm": 0,
+      "to_stack": "taught/layer-0/to-stack/motion.json",
+      "reference": "taught/layer-0/approach/reference.json",
+      "place": "taught/layer-0/place/motion.json",
+      "inspect": "taught/layer-0/inspect/motion.json",
+      "inspect_reference": "taught/layer-0/inspection/reference.json",
+      "return": "taught/layer-0/return/motion.json",
+      "recover_drop": "taught/layer-0/recover-drop/motion.json",
+      "stack_roi": null,
+      "held_roi": null
+    },
+    {
+      "validated": false,
+      "height_mm": 25,
+      "to_stack": "taught/layer-1/to-stack/motion.json",
+      "reference": "taught/layer-1/approach/reference.json",
+      "place": "taught/layer-1/place/motion.json",
+      "inspect": "taught/layer-1/inspect/motion.json",
+      "inspect_reference": "taught/layer-1/inspection/reference.json",
+      "return": "taught/layer-1/return/motion.json",
+      "recover_drop": "taught/layer-1/recover-drop/motion.json",
+      "stack_roi": null,
+      "held_roi": null
+    },
+    {
+      "validated": false,
+      "height_mm": 50,
+      "to_stack": "taught/layer-2/to-stack/motion.json",
+      "reference": "taught/layer-2/approach/reference.json",
+      "place": "taught/layer-2/place/motion.json",
+      "inspect": "taught/layer-2/inspect/motion.json",
+      "inspect_reference": "taught/layer-2/inspection/reference.json",
+      "return": "taught/layer-2/return/motion.json",
+      "recover_drop": "taught/layer-2/recover-drop/motion.json",
+      "stack_roi": null,
+      "held_roi": null
+    }
+  ]
+}

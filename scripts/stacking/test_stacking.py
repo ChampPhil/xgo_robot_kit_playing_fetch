@@ -1,0 +1,444 @@
+"""Offline images, state-machine faults, profile preflight, and live-loop stop contracts."""
+
+import contextlib
+import copy
+import io
+import itertools
+import json
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import cv2
+import numpy as np
+
+import profiles
+import robot
+import stack_boxes
+from simulation import FLOOR, HELD, STACK, Simulation, scene
+from vision import (COLORS, InventoryTracker, Perception, Stable, inventory, make_marker,
+                    marker_matches, pickup_verdict, tower_verdict)
+from workflow import Stopped, Tower, validate_order
+
+
+class VisionTests(unittest.TestCase):
+    def setUp(self):
+        self.vision = Perception()
+
+    def test_three_colors_have_distinct_continuous_tracks(self):
+        view = self.vision.observe(scene(COLORS))
+        tracker = InventoryTracker(COLORS, FLOOR)
+        self.assertFalse(tracker.update(view, 1)["ready"])
+        self.assertFalse(tracker.update(view, 2)["ready"])
+        report = tracker.update(view, 3)
+        self.assertTrue(report["ready"])
+        self.assertEqual(len(set(t["id"] for t in report["tracks"].values())), 3)
+        self.assertFalse(tracker.update(view, 3)["ready"])
+
+    def test_duplicates_missing_and_jumps_reset_tracking(self):
+        tracker = InventoryTracker(COLORS, FLOOR, count=1)
+        first = tracker.update(self.vision.observe(scene(COLORS)), 1)
+        duplicate = tracker.update(self.vision.observe(scene([*COLORS, "purple"])), 2)
+        self.assertFalse(duplicate["ready"])
+        self.assertIn("purple", duplicate["ambiguous"])
+        restored = self.vision.observe(scene(COLORS))
+        second = tracker.update(restored, 3)
+        self.assertNotEqual(first["tracks"]["purple"]["id"], second["tracks"]["purple"]["id"])
+        restored["boxes"]["purple"][0]["bbox"][0] += 0.1
+        third = tracker.update(restored, 4)
+        self.assertNotEqual(second["tracks"]["purple"]["id"], third["tracks"]["purple"]["id"])
+        missing = tracker.update(self.vision.observe(scene(["orange"])), 5)
+        self.assertEqual(set(missing["missing"]), {"purple", "light-blue"})
+
+    def test_no_fixed_starting_slot(self):
+        view = self.vision.observe(scene(list(reversed(COLORS))))
+        self.assertTrue(inventory(view, COLORS, FLOOR)["ready"])
+
+    def test_disappearance_never_proves_pickup(self):
+        self.assertEqual(pickup_verdict(self.vision.observe(scene()), "purple", FLOOR, HELD), "unknown")
+        self.assertEqual(pickup_verdict(self.vision.observe(scene(held="purple")), "purple", FLOOR, HELD), "held")
+        self.assertEqual(pickup_verdict(self.vision.observe(scene(["purple"])), "purple", FLOOR, HELD), "floor")
+
+    def test_floor_and_held_or_duplicate_floor_is_unknown(self):
+        for image in (scene(["purple"], "purple"), scene(["purple", "purple"])):
+            self.assertEqual(pickup_verdict(self.vision.observe(image), "purple", FLOOR, HELD), "unknown")
+
+    def test_calibrated_readback_must_agree_with_positive_vision(self):
+        view = self.vision.observe(scene(held="purple"))
+        band = {"empty": [0, 30], "occupied": [100, 160]}
+        self.assertEqual(pickup_verdict(view, "purple", FLOOR, HELD, 120, band), "held")
+        for raw in (None, 0, 255):
+            self.assertEqual(pickup_verdict(view, "purple", FLOOR, HELD, raw, band), "unknown")
+
+    def test_every_tower_order_is_verified_bottom_to_top(self):
+        marker = self.vision.observe(scene())["marker"]
+        for order in itertools.permutations(COLORS):
+            view = self.vision.observe(scene(tower=order))
+            self.assertEqual(tower_verdict(view, order, STACK, HELD, marker), "placed")
+            self.assertEqual(tower_verdict(view, order[::-1], STACK, HELD, marker), "unknown")
+
+    def test_side_by_side_boxes_and_unreleased_box_do_not_verify_a_tower(self):
+        marker = self.vision.observe(scene())["marker"]
+        side_by_side = self.vision.observe(scene(COLORS))
+        self.assertEqual(tower_verdict(side_by_side, COLORS, [0, 0.4, 1, 1], HELD, marker), "unknown")
+        held = self.vision.observe(scene(held="purple", tower=COLORS))
+        self.assertEqual(tower_verdict(held, COLORS, STACK, HELD, marker), "unknown")
+
+    def test_extra_color_in_stack_and_missing_marker_are_unknown(self):
+        marker = self.vision.observe(scene())["marker"]
+        self.assertEqual(tower_verdict(self.vision.observe(scene(tower=COLORS)),
+                                     ["purple"], STACK, HELD, marker), "unknown")
+        self.assertEqual(tower_verdict(self.vision.observe(scene(tower=COLORS, marker=False)),
+                                     COLORS, STACK, HELD, marker), "unknown")
+
+    def test_marker_identity_duplicates_and_corner_mismatch(self):
+        frame = scene()
+        marker = self.vision.observe(frame)["marker"]
+        self.assertTrue(marker_matches(marker, marker))
+        changed = copy.deepcopy(marker)
+        changed["corners"][0][0] += 0.05
+        self.assertFalse(marker_matches(changed, marker))
+        self.assertIsNone(Perception(1).observe(frame)["marker"])
+        frame[240:340, 400:500] = 255
+        frame[250:330, 410:490] = frame[250:330, 110:190]
+        doubled = self.vision.observe(frame)
+        self.assertEqual(doubled["marker_count"], 2)
+        self.assertIsNone(doubled["marker"])
+
+    def test_generated_printable_marker_roundtrips_and_does_not_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "marker.png"
+            make_marker(path, 3)
+            self.assertEqual(Perception(3).observe(cv2.imread(str(path)))["marker_count"], 1)
+            with self.assertRaises(ValueError):
+                make_marker(path, 3)
+
+    def test_marker_sizes_supported_by_pi_opencv_47_and_local_410(self):
+        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        for size in (60, 72, 80, 84, 96, 120, 160, 240):
+            with self.subTest(size=size):
+                tile = cv2.aruco.generateImageMarker(dictionary, 0, size)
+                image = np.full((480, 640, 3), 100, np.uint8)
+                image[100:120 + size, 100:120 + size] = 255
+                image[110:110 + size, 110:110 + size] = cv2.cvtColor(tile, cv2.COLOR_GRAY2BGR)
+                self.assertEqual(self.vision.observe(image)["marker_count"], 1)
+
+    def test_verification_requires_fresh_consecutive_frames(self):
+        stable = Stable(3)
+        self.assertFalse(stable.update("held", 1))
+        self.assertFalse(stable.update("held", 1))
+        self.assertFalse(stable.update("unknown", 2))
+        self.assertFalse(stable.update("held", 3))
+        self.assertFalse(stable.update("held", 4))
+        self.assertTrue(stable.update("held", 5))
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_all_six_orders_finish_and_stop(self):
+        for order in itertools.permutations(COLORS):
+            backend = Simulation()
+            tower = Tower(backend, order)
+            self.assertEqual(tower.run()["placed"], list(order))
+            self.assertEqual(backend.placed, list(order))
+            self.assertTrue(backend.stopped)
+
+    def test_failed_pick_and_dropped_carry_retry_same_color(self):
+        events = []
+        backend = Simulation(fail_first="purple", drop_first="orange")
+        self.assertEqual(Tower(backend, COLORS, log=events.append).run()["status"], "done")
+        picks = [e["color"] for e in events if e["state"] == "pick"]
+        self.assertEqual(picks, ["purple", "purple", "orange", "orange", "light-blue"])
+
+    def test_retries_are_bounded_and_do_not_advance(self):
+        class Misses(Simulation):
+            def pick(self, color):
+                pass
+        events = []
+        backend = Misses()
+        tower = Tower(backend, COLORS, attempts=2, log=events.append)
+        with self.assertRaisesRegex(Stopped, "exhausted"):
+            tower.run()
+        self.assertEqual(sum(e["state"] == "pick" for e in events), 2)
+        self.assertEqual(tower.placed, [])
+        self.assertTrue(backend.stopped)
+
+    def test_unknown_pickup_never_carries(self):
+        events = []
+        backend = Simulation(uncertain="purple")
+        with self.assertRaisesRegex(Stopped, "uncertain"):
+            Tower(backend, COLORS, log=events.append).run()
+        self.assertFalse(any(e["state"] in ("carry", "place") for e in events))
+        self.assertTrue(backend.stopped)
+
+    def test_unknown_transport_never_places(self):
+        backend = Simulation()
+        backend.carry = Mock(return_value="unknown")
+        backend.place = Mock()
+        with self.assertRaisesRegex(Stopped, "transport"):
+            Tower(backend, COLORS).run()
+        backend.place.assert_not_called()
+
+    def test_failed_placement_is_not_committed_and_next_color_not_picked(self):
+        backend = Simulation()
+        backend.verify_place = Mock(return_value="unknown")
+        backend.return_to_survey = Mock()
+        tower = Tower(backend, COLORS)
+        with self.assertRaisesRegex(Stopped, "tower uncertain"):
+            tower.run()
+        self.assertEqual(tower.placed, [])
+        backend.return_to_survey.assert_not_called()
+        self.assertTrue(backend.stopped)
+
+    def test_operator_cancel_stops_even_inside_pick(self):
+        backend = Simulation()
+        backend.pick = Mock(side_effect=KeyboardInterrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            Tower(backend, COLORS).run()
+        self.assertTrue(backend.stopped)
+
+    def test_invalid_order_and_attempt_limits(self):
+        for order in (["purple"] * 3, ["purple"], ["red", "orange", "purple"]):
+            with self.assertRaises(ValueError):
+                validate_order(order)
+        for attempts in (True, 0, 6, 1.5):
+            with self.assertRaises(ValueError):
+                Tower(Simulation(), COLORS, attempts)
+
+
+class ProfilesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = {"arm": [80, 30], "kneel": 1.0}
+        neutral = {"version": 1, "duration": 1, "start": dict(self.state, claw=200),
+                   "events": [{"t": 0.2, "arm": [80, 30]}]}
+        pickup = copy.deepcopy(neutral)
+        pickup["start"]["claw"] = 0
+        pickup["events"].append({"t": 0.3, "claw": 200})
+        place = copy.deepcopy(neutral)
+        place["events"].append({"t": 0.3, "claw": 0})
+        for name, data in (("neutral.json", neutral), ("pick.json", pickup), ("place.json", place)):
+            self.write(name, data)
+        for color in (*COLORS, "marker"):
+            image = scene() if color == "marker" else scene([color], marker=False)
+            cv2.imwrite(str(self.root / (color + ".png")), image)
+            self.write(color + ".json", {"image": color + ".png", "state": self.state})
+        self.config = {
+            "version": 1, "validated": True, "marker_id": 0,
+            "survey_floor_roi": FLOOR, "survey_motion": "neutral.json",
+            "verification": {"validated": True, "floor_roi": FLOOR, "held_roi": HELD,
+                             "motion": "neutral.json", "grip_raw": None},
+            "pickups": {c: {"validated": True, "reference": c + ".json", "motion": "pick.json",
+                            "retry": "neutral.json"} for c in COLORS},
+            "layers": [{"validated": True, "height_mm": i * 25,
+                        "to_stack": "neutral.json", "reference": "marker.json",
+                        "place": "place.json", "inspect": "neutral.json",
+                        "inspect_reference": "marker.json", "return": "neutral.json",
+                        "recover_drop": "neutral.json", "stack_roi": STACK, "held_roi": HELD}
+                       for i in range(3)]}
+
+    def write(self, name, value):
+        path = self.root / name
+        path.write_text(json.dumps(value))
+        return path
+
+    def load(self):
+        return profiles.Plan(self.write("config.json", self.config), Perception())
+
+    def test_complete_taught_profile_preloads_and_preserves_grip(self):
+        plan = self.load()
+        self.assertEqual(len(plan.layers), 3)
+        self.assertIsNone(plan.layers[0]["to_stack"]["start"]["claw"])
+        self.assertIsNone(plan.layers[0]["place"]["start"]["claw"])
+        self.assertEqual(plan.layers[0]["place"]["events"][-1]["claw"], 0)
+
+    def test_disabled_profile_and_missing_route_fail_before_robot_init(self):
+        self.config["validated"] = False
+        with self.assertRaisesRegex(ValueError, "not validated"):
+            self.load()
+        path = self.write("config.json", self.config)
+        with patch.object(robot, "Robot") as hardware, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(stack_boxes.main(["--execute", "--robot", "--config", str(path)]), 2)
+            hardware.assert_not_called()
+        self.config["validated"] = True
+        self.config["layers"][2]["to_stack"] = "missing.json"
+        with self.assertRaises(OSError):
+            self.load()
+
+    def test_overlapping_held_and_floor_rois_rejected(self):
+        self.config["verification"]["held_roi"] = FLOOR
+        with self.assertRaisesRegex(ValueError, "disjoint"):
+            self.load()
+
+    def test_overlapping_readback_bands_rejected(self):
+        self.config["verification"]["grip_raw"] = {"empty": [0, 120], "occupied": [100, 255]}
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            self.load()
+
+    def test_layers_are_not_generated_by_guessing_arm_z(self):
+        self.config["layers"][1]["height_mm"] = 0
+        with self.assertRaisesRegex(ValueError, "25 and 50"):
+            self.load()
+
+    def test_mismatched_camera_pose_rejected(self):
+        self.write("marker.json", {"state": {"arm": [90, 30], "kneel": 1.0}, "image": "marker.png"})
+        with self.assertRaisesRegex(ValueError, "must match"):
+            self.load()
+
+    def test_carry_claw_event_and_placement_walking_rejected(self):
+        motion = json.loads((self.root / "neutral.json").read_text())
+        motion["events"].append({"t": 0.4, "claw": 0})
+        path = self.write("bad.json", motion)
+        with self.assertRaisesRegex(ValueError, "preserve"):
+            profiles.read_motion(path, "carry")
+        motion["events"][-1] = {"t": 0.4, "walk": {"x": 1, "y": 0, "yaw": 0}}
+        with self.assertRaisesRegex(ValueError, "must not walk"):
+            profiles.read_motion(self.write("bad.json", motion), "place")
+
+    def test_bad_times_unreachable_arm_unknown_events_and_no_release_rejected(self):
+        good = json.loads((self.root / "neutral.json").read_text())
+        for event in ({"t": float("nan"), "arm": [80, 30]},
+                      {"t": 0.2, "arm": [155, 155]},
+                      {"t": 0.2, "reset": 1},
+                      {"t": True, "kneel": 0}):
+            bad = dict(good, events=[event])
+            with self.subTest(event=event), self.assertRaises(ValueError):
+                profiles.read_motion(self.write("bad.json", bad), "carry")
+        with self.assertRaisesRegex(ValueError, "explicit claw"):
+            profiles.read_motion(self.root / "neutral.json", "place")
+
+    def test_route_must_contain_its_leg_stop_instead_of_truncating_a_walk(self):
+        motion = json.loads((self.root / "neutral.json").read_text())
+        motion["events"] = [{"t": 0.2, "walk": {"x": 6, "y": 0, "yaw": 0}}]
+        with self.assertRaisesRegex(ValueError, "explicit leg stop"):
+            profiles.read_motion(self.write("route.json", motion), "carry")
+        motion["events"].append({"t": 0.8, "walk": {"x": 0, "y": 0, "yaw": 0}})
+        self.assertEqual(len(profiles.read_motion(self.write("route.json", motion), "carry")["events"]), 2)
+
+    def test_malformed_configuration_does_not_initialize_hardware(self):
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(robot, "Robot") as hardware:
+            path = self.write("bad-config.json", [])
+            self.assertEqual(stack_boxes.main(["--execute", "--robot", "--config", str(path)]), 2)
+            hardware.assert_not_called()
+
+
+class RuntimeTests(unittest.TestCase):
+    def controller(self):
+        backend = object.__new__(robot.Robot)
+        backend.heartbeat = Mock()
+        backend.camera = Mock()
+        backend.camera.latest.return_value = (object(), 10)
+        backend.driver = Mock()
+        backend.started = 0
+        backend.last_service = 9.9
+        backend.battery_at = 10
+        backend.read_register = Mock(return_value=bytes([80]))
+        return backend
+
+    def test_stale_camera_stalled_loop_and_low_battery_stop(self):
+        for condition in ("camera", "loop", "battery", "heartbeat"):
+            backend = self.controller()
+            if condition == "camera":
+                backend.camera.latest.return_value = (object(), 8)
+            elif condition == "loop":
+                backend.last_service = 9
+            elif condition == "battery":
+                backend.battery_at = 0
+                backend.read_register.return_value = bytes([0])
+            else:
+                backend.heartbeat.check.side_effect = Stopped("no heartbeat")
+            with patch.object(robot.time, "monotonic", return_value=10), self.assertRaises(Stopped):
+                backend.service()
+
+    def test_alignment_motion_is_not_measured_as_gyro_drift(self):
+        backend = self.controller()
+        with patch.object(robot.time, "monotonic", return_value=10):
+            backend.service(external=True)
+        backend.driver.refresh.assert_called_once_with(external_motion=True)
+
+    def test_motion_error_aborts_replayer_and_stops_legs(self):
+        backend = self.controller()
+        backend.replayer = Mock(active=True)
+        backend.service = Mock(side_effect=Stopped("camera stale"))
+        with self.assertRaises(Stopped):
+            backend.motion({})
+        backend.replayer.abort.assert_called_once()
+        backend.driver.stop.assert_called_once()
+
+    def test_stopping_never_resets_arm_or_opens_claw(self):
+        backend = self.controller()
+        backend.dog = Mock()
+        backend.stop()
+        backend.driver.stop.assert_called_once()
+        backend.dog.claw.assert_not_called()
+        backend.dog.reset.assert_not_called()
+
+    def test_serial_is_closed_even_if_camera_cleanup_fails(self):
+        backend = self.controller()
+        backend.dog = Mock()
+        backend.camera.close.side_effect = RuntimeError("camera cleanup")
+        with self.assertRaisesRegex(RuntimeError, "camera cleanup"):
+            backend.close()
+        backend.dog.ser.close.assert_called_once()
+
+    def test_heartbeat_timeout_and_eof(self):
+        heartbeat = object.__new__(robot.Heartbeat)
+        heartbeat.clock = lambda: 10
+        heartbeat.last, heartbeat.error, heartbeat.lock = 9.4, None, threading.Lock()
+        with self.assertRaisesRegex(Stopped, "0.5"):
+            heartbeat.check()
+        for line in ('{"heartbeat":true}\n', '{"heartbeat":1}\n', 'garbage\n'):
+            stream = robot.Heartbeat(io.StringIO(line))
+            stream.thread.join(1)
+            with self.assertRaises(Stopped):
+                stream.check()
+
+
+class CLITests(unittest.TestCase):
+    def test_camera_only_reference_capture_roundtrips_a_recorded_pose(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            image, pose_file, destination = root / "scene.png", root / "pose.json", root / "capture"
+            cv2.imwrite(str(image), scene())
+            pose_file.write_text(json.dumps({"state": {"arm": [80, 30], "kneel": 1.0, "claw": 200}}))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(stack_boxes.main(["--capture-reference", str(destination),
+                    "--source", str(image), "--pose-file", str(pose_file)]), 0)
+            reference = json.loads((destination / "reference.json").read_text())
+            self.assertEqual(reference["state"], {"arm": [80, 30], "kneel": 1.0})
+            self.assertIsNotNone(Perception().observe(cv2.imread(str(destination / "reference.jpg")))["marker"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(stack_boxes.main(["--capture-reference", str(destination),
+                    "--source", str(image), "--pose-file", str(pose_file)]), 2)
+
+    def test_simulation_reports_no_physical_success(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = stack_boxes.main(["--simulate", "--fail-first", "purple", "--drop-first", "orange"])
+        self.assertEqual(code, 0)
+        final = json.loads(output.getvalue().splitlines()[-1])
+        self.assertFalse(final["physical_success"])
+        self.assertEqual(final["placed"], list(COLORS))
+
+    def test_unknown_pickup_cli_stops(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(stack_boxes.main(["--simulate", "--uncertain", "purple"]), 2)
+
+    def test_single_image_observer_labels_its_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "scene.png"
+            cv2.imwrite(str(path), scene(COLORS))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = stack_boxes.main(["--observe", "--source", str(path)])
+            self.assertEqual(code, 0)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["evidence"], "single_image")
+            self.assertEqual(len(report["inventory"]["tracks"]), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
