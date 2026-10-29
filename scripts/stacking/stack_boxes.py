@@ -29,6 +29,12 @@ def parser():
     modes.add_argument("--check-config", action="store_true", help="validate all taught assets; no hardware")
     modes.add_argument("--import-recording", type=Path, metavar="SESSION",
                        help="copy a teleop recording into the workcell as --asset; no hardware")
+    modes.add_argument("--generate-placements", type=Path, metavar="PICKUP_SESSION",
+                       help="build all three layer placements and the carry check from a proven "
+                       "pickup recording; no hardware")
+    modes.add_argument("--capture-approach", action="store_true",
+                       help="save the marker view from the placement start (robot aligned to a "
+                       "block on the stack spot) for every layer; camera/stream only")
     modes.add_argument("--setup-report", action="store_true",
                        help="list everything still missing or invalid in the workcell; no hardware")
     modes.add_argument("--execute", action="store_true", help="supervised live run through SSH heartbeat")
@@ -266,6 +272,23 @@ def main(argv=None):
                 raise ValueError("--import-recording needs --asset")
             emit(dict(import_recording(args.import_recording, args.asset, args.config,
                                        perception), mode="import", motion_sent=False))
+            return 0
+        if args.generate_placements:
+            from importer import generate_placements
+
+            emit(dict(generate_placements(args.generate_placements, args.config),
+                      mode="generate-placements", motion_sent=False))
+            return 0
+        if args.capture_approach:
+            from importer import capture_approach
+
+            latest = None
+            for frame, _, _ in frames(args.source, min(args.frames, 30)):
+                latest = frame
+            if latest is None:
+                raise ValueError("no camera frame")
+            emit(dict(capture_approach(args.config, latest, perception), mode="capture-approach",
+                      motion_sent=False))
             return 0
         if args.setup_report:
             from profiles import setup_report

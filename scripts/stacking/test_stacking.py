@@ -473,6 +473,184 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue().splitlines()[-1])["asset"], "pick-purple")
 
 
+class FloorRuleTests(unittest.TestCase):
+    """The carried color seen on the floor at any point = not held: retry the pickup."""
+
+    def verdict(self, frame, color="purple"):
+        return pickup_verdict(Perception().observe(frame), color, FLOOR, None)
+
+    def test_carried_color_on_the_floor_means_not_held(self):
+        self.assertEqual(self.verdict(scene(floor=["purple"])), "floor")
+
+    def test_no_floor_sighting_counts_as_held(self):
+        self.assertEqual(self.verdict(scene()), "held")
+        self.assertEqual(self.verdict(scene(held="purple")), "held")  # in the claw, above
+        self.assertEqual(self.verdict(scene(floor=["orange", "light-blue"])), "held")
+
+    def test_held_roi_is_optional_in_the_profile(self):
+        fixture = ProfilesTests("test_complete_taught_profile_preloads_and_preserves_grip")
+        fixture.setUp()
+        self.addCleanup(fixture.temp.cleanup)
+        fixture.config["verification"]["held_roi"] = None
+        self.assertIsNone(fixture.load().verify_held)
+        report = profiles.setup_report(fixture.write("config.json", fixture.config), Perception())
+        statuses = {item["item"]: item["status"] for item in report["items"]}
+        self.assertEqual(statuses["verification held_roi"], "ok")
+        self.assertTrue(report["ready"])
+
+
+class WatchTests(unittest.TestCase):
+    """While carrying, every fresh sharp frame is checked for the box on the floor."""
+
+    def backend(self, floor_frames):
+        backend = object.__new__(robot.Robot)
+        backend.driver = Mock()
+        backend.service = Mock()
+        backend.log = Mock()
+        backend.heartbeat = Mock()
+        backend.plan = Mock(verify_floor=FLOOR)
+        backend.not_before = 0
+        backend.replayer = Mock(active=True)
+        stamps = iter(range(1, 1000))
+        backend.camera = Mock()
+        backend.camera.latest.side_effect = lambda: ("frame", next(stamps))
+        views = iter(floor_frames)
+        backend.perception = Mock()
+        backend.perception.observe.side_effect = lambda frame: Perception().observe(
+            scene(floor=["purple"]) if next(views, False) else scene())
+        return backend
+
+    def test_box_seen_on_the_floor_stops_the_carry(self):
+        backend = self.backend([False, True, True, True])
+        with patch.object(robot, "laplacian_sharpness", return_value=400), \
+                patch.object(robot.time, "sleep"):
+            self.assertEqual(backend.motion({}, watch="purple"), "floor")
+        backend.replayer.abort.assert_called()
+        backend.driver.stop.assert_called()
+
+    def test_a_single_flicker_is_not_a_drop(self):
+        backend = self.backend([True, False, True, False, False])
+        ticks = iter([True] * 5 + [False])
+        type(backend.replayer).active = property(lambda self: next(ticks))
+        with patch.object(robot, "laplacian_sharpness", return_value=400), \
+                patch.object(robot.time, "sleep"):
+            self.assertIsNone(backend.motion({}, watch="purple"))
+
+
+PICKUP = {"version": 1, "duration": 30.0, "start": {"arm": None, "claw": None, "kneel": 1.0},
+          "events": [{"t": 5.0, "arm": [80, 30]}, {"t": 8.0, "arm": [110, 0]},
+                     {"t": 11.0, "arm": [137, -30]},
+                     {"t": 14.0, "claw": 128}, {"t": 15.0, "claw": 255},
+                     {"t": 20.0, "arm": [100, 40]}, {"t": 25.0, "arm": [0, 80]}]}
+
+
+class PlacementTests(unittest.TestCase):
+    """Placement = the pickup's reach replayed while holding, releasing where it closed."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.session = self.root / "20261015-220825"
+        self.session.mkdir()
+        (self.session / "motion.json").write_text(json.dumps(PICKUP))
+        self.config = self.root / "cell" / "workcell.json"
+
+    def generate(self):
+        return importer.generate_placements(self.session, self.config)
+
+    def place(self, layer):
+        return json.loads((self.config.parent / "taught" / ("layer-%d" % layer) / "place" /
+                           "motion.json").read_text())
+
+    def test_layer_one_mirrors_the_pickup(self):
+        self.generate()
+        motion = self.place(0)
+        self.assertEqual(motion["start"], {"arm": [80, 30], "kneel": 1.0, "claw": None})
+        arms = [e["arm"] for e in motion["events"] if "arm" in e]
+        self.assertEqual(arms[:3], [[80, 30], [110, 0], [137, -30]])  # the reach, as recorded
+        claws = [e for e in motion["events"] if "claw" in e]
+        self.assertEqual([e["claw"] for e in claws], [0])  # one release, no close
+        release = claws[0]["t"]
+        self.assertTrue(all(e["t"] <= release for e in motion["events"][:3]))
+        # then back and up in a straight line to the start pose, never dragging the open claw
+        # along the floor like the pickup's own pull-back (that would knock the block)
+        retreat = [e["arm"] for e in motion["events"] if "arm" in e and e["t"] > release]
+        self.assertEqual(retreat[-1], [80, 30])
+        self.assertTrue(all(a[0] <= b[0] and a[1] >= b[1] for a, b in zip(retreat[1:], retreat)))
+        profiles.read_motion(self.config.parent / "taught/layer-0/place/motion.json", "place")
+
+    def test_higher_layers_release_one_and_two_blocks_higher(self):
+        self.generate()
+        for layer in (1, 2):
+            arms = [e["arm"] for e in self.place(layer)["events"] if "arm" in e]
+            self.assertEqual(arms[0], [80, 30])  # same start: same marker alignment
+            self.assertEqual(arms[2], [137, -30 + 25 * layer])  # the release point
+            profiles.read_motion(self.config.parent / ("taught/layer-%d/place/motion.json" %
+                                                       layer), "place")
+
+    def test_workcell_is_updated_and_left_unreviewed(self):
+        self.generate()
+        cell = json.loads(self.config.read_text())
+        for layer in range(3):
+            self.assertEqual(cell["layers"][layer]["place"],
+                             "taught/layer-%d/place/motion.json" % layer)
+            self.assertFalse(cell["layers"][layer]["validated"])
+        self.assertEqual(cell["verification"]["motion"], "taught/carry-check/motion.json")
+        self.assertIsNone(cell["verification"]["held_roi"])
+        check = profiles.read_motion(self.config.parent / "taught/carry-check/motion.json",
+                                     "check")
+        self.assertEqual(profiles.end_pose(check), {"arm": [80, 30], "kneel": 1.0})
+        statuses = {i["item"]: i["status"] for i in
+                    profiles.setup_report(self.config, Perception())["items"]}
+        self.assertEqual(statuses["layer 2 place motion"], "ok")
+        self.assertEqual(statuses["verification check motion"], "ok")
+
+    def test_out_of_reach_or_existing_output_refused_and_nothing_written(self):
+        far = copy.deepcopy(PICKUP)
+        far["events"][2]["arm"] = [139, -10]  # +50 mm would leave the reach ring
+        (self.session / "motion.json").write_text(json.dumps(far))
+        with self.assertRaisesRegex(ValueError, "layer 3"):
+            self.generate()
+        self.assertFalse(self.config.exists())
+        (self.session / "motion.json").write_text(json.dumps(PICKUP))
+        self.generate()
+        before = (self.config.parent / "taught/layer-0/place/motion.json").read_bytes()
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.generate()
+        self.assertEqual((self.config.parent / "taught/layer-0/place/motion.json").read_bytes(),
+                         before)
+
+    def test_recorded_grab_at_the_reach_edge_is_accepted(self):
+        self.assertTrue(profiles.in_reach(137, -30))  # 140.25 mm: teleop rounding
+        self.assertFalse(profiles.in_reach(139, 40))  # 144.6 mm: really out of reach
+
+    def test_a_recording_without_a_grab_is_refused(self):
+        bad = dict(PICKUP, events=[e for e in PICKUP["events"] if "claw" not in e])
+        (self.session / "motion.json").write_text(json.dumps(bad))
+        with self.assertRaisesRegex(ValueError, "close"):
+            self.generate()
+
+    def test_marker_view_is_captured_at_the_placement_start_for_every_layer(self):
+        self.generate()
+        image = self.root / "marker-view.png"
+        cv2.imwrite(str(image), scene())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(stack_boxes.main(["--capture-approach", "--source", str(image),
+                                               "--config", str(self.config)]), 0)
+        cell = json.loads(self.config.read_text())
+        for layer in range(3):
+            self.assertEqual(cell["layers"][layer]["reference"],
+                             "taught/approach/reference.json")
+        reference = json.loads((self.config.parent / "taught/approach/reference.json")
+                               .read_text())
+        self.assertEqual(reference["state"], {"arm": [80, 30], "kneel": 1.0})
+        statuses = {i["item"]: i["status"] for i in
+                    profiles.setup_report(self.config, Perception())["items"]}
+        self.assertEqual(statuses["layer 1 approach reference"], "ok")
+        self.assertEqual(statuses["layer 1 place/approach/check poses match"], "ok")
+
+
 class RuntimeTests(unittest.TestCase):
     def controller(self):
         backend = object.__new__(robot.Robot)

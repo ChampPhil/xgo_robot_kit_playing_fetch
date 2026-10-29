@@ -9,7 +9,7 @@ from pathlib import Path
 from vision import COLORS, features, overlaps, roi
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "teleop"))
-from body import ARM_LIMITS, in_reach  # noqa: E402
+from body import ARM_LIMITS, ARM_REACH  # noqa: E402
 from teach import load_motion  # noqa: E402
 
 
@@ -18,6 +18,12 @@ def number(value, low, high, label):
             or not math.isfinite(value) or not low <= value <= high):
         raise ValueError(label + " is outside its finite allowed range")
     return value
+
+
+def in_reach(x, z):
+    """Teleop's reach ring, with 1 mm for whole-mm rounding at its edge: recorded poses come
+    from teleop (the proven 2026-10-15 pickup grabbed at (137, -30), 140.25 mm out)."""
+    return x >= 0 and ARM_REACH[0] - 1 <= math.hypot(x, z) <= ARM_REACH[1] + 1
 
 
 def pose(value):
@@ -37,6 +43,10 @@ def pose(value):
 def read_motion(path, role):
     motion = copy.deepcopy(load_motion(Path(path).parent)) if Path(path).name == "motion.json" else \
         json.loads(Path(path).read_text())
+    return validate_motion(motion, role)
+
+
+def validate_motion(motion, role):
     if not isinstance(motion, dict) or motion.get("version") != 1 or not isinstance(motion.get("start"), dict):
         raise ValueError("motion must use teach/replay version 1")
     start = motion["start"]
@@ -131,8 +141,9 @@ class Plan:
         if not isinstance(self.verify, dict) or self.verify.get("validated") is not True:
             raise ValueError("pickup verification view/ROIs have not been validated")
         self.verify_floor = roi(self.verify["floor_roi"])
-        self.verify_held = roi(self.verify["held_roi"])
-        if overlaps(self.verify_floor, self.verify_held):
+        held = self.verify.get("held_roi")
+        self.verify_held = None if held is None else roi(held)  # None: the floor rule
+        if self.verify_held is not None and overlaps(self.verify_floor, self.verify_held):
             raise ValueError("floor and held ROIs must be disjoint in the taught check pose")
         self.grip_profile = self.verify.get("grip_raw")
         if self.grip_profile is not None:
@@ -284,7 +295,12 @@ def setup_report(filename, perception):
     verify = get("verification") if isinstance(get("verification"), dict) else {}
     report.reviewed("verification reviewed", verify)
     floor = report.check("verification floor_roi", roi, verify.get("floor_roi"))
-    held = report.check("verification held_roi", roi, verify.get("held_roi"))
+    if verify.get("held_roi") is None:
+        held = None
+        report.add("verification held_roi", "ok", "not set: floor rule (box on the floor = "
+                   "not held)")
+    else:
+        held = report.check("verification held_roi", roi, verify.get("held_roi"))
     report.agree("verification floor/held ROIs disjoint", (floor, held), _disjoint,
                  "floor and held ROIs must be disjoint in the taught check pose")
     check = report.check("verification check motion", plan.motion, verify.get("motion"), "check")

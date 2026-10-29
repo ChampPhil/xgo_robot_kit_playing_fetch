@@ -128,21 +128,38 @@ class Robot:
                 raise Stopped("battery invalid or below 20%")
         self.driver.refresh(external_motion=external)
 
-    def motion(self, motion):
+    def motion(self, motion, watch=None):
+        """Replay a motion. watch=color: while carrying it, stop and return "floor" as soon as
+        it is seen on the floor (3 fresh sharp frames in a row; one flicker is not a drop)."""
         self.heartbeat.check()
         self.replayer.start(motion)
         deadline = time.monotonic() + 65
+        sightings, last = 0, None
         try:
             while self.replayer.active:
                 self.service()
                 if time.monotonic() > deadline:
                     raise Stopped("motion deadline exceeded")
+                if watch is not None:
+                    frame, stamp = self.camera.latest()
+                    if stamp != last and stamp >= self.not_before:
+                        last = stamp
+                        if laplacian_sharpness(frame) >= 50:
+                            scene = self.perception.observe(frame)
+                            seen = pickup_verdict(scene, watch, self.plan.verify_floor,
+                                                  None) == "floor"
+                            sightings = sightings + 1 if seen else 0
+                            if sightings >= 3:
+                                self.log({"state": "evidence", "result": "floor",
+                                          "key": "dropped while carrying " + watch})
+                                return "floor"
                 self.replayer.tick()
                 time.sleep(0.03)
         finally:
             self.replayer.abort()
             self.driver.stop()
             self.not_before = time.monotonic() + 0.7
+        return None
 
     def observe_until(self, evaluate, seconds=6):
         self.driver.stop()
@@ -226,13 +243,16 @@ class Robot:
         return self.observe_until(evaluate)
 
     def verify_pick(self, color):
-        self.motion(self.plan.check)
+        if self.motion(self.plan.check, watch=color) == "floor":
+            return "floor"
         return self.grip_verdict(color)
 
     def carry(self, color, layer):
         entry = self.plan.layers[layer]
-        self.motion(entry["to_stack"])
-        self.motion(self.plan.check)
+        if self.motion(entry["to_stack"], watch=color) == "floor":
+            return "floor"
+        if self.motion(self.plan.check, watch=color) == "floor":
+            return "floor"
         verdict = self.grip_verdict(color)
         if verdict != "held":
             return verdict

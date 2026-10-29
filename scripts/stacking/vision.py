@@ -103,8 +103,13 @@ def inventory(scene, colors, floor, excluded=()):
 
 
 def pickup_verdict(scene, color, floor, held, grip=None, grip_profile=None):
-    """Only a visible held box + no floor box succeeds. Disappearance alone is unknown."""
+    """held=None (the floor rule): the carried color anywhere in the floor region means it is
+    not held; otherwise it counts as held (the lifted box is above the camera's view, and a
+    later tower check confirms it arrived). With a held region, a visible held box + no floor
+    box succeeds and disappearance alone is unknown."""
     on_floor = candidates(scene, color, floor)
+    if held is None:
+        return "floor" if on_floor else "held"
     in_hand = candidates(scene, color, held)
     if len(on_floor) > 1 or len(in_hand) > 1 or (on_floor and in_hand):
         return "unknown"

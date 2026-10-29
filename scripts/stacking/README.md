@@ -157,6 +157,37 @@ Assets: `survey`, `carry-check`, `pick-<color>` (also copies its start reference
 with an unknown (null) arm start is refused: set an explicit arm pose before pressing X. The
 proven 2026-10-15 purple pickup has such a start, so it cannot be imported as is.
 
+### Placements from the proven pickup (no placement recording)
+
+```bash
+python3 scripts/stacking/stack_boxes.py --generate-placements ~/xgo_teach/20261015-220825 \
+  --config ~/xgo_teach/stacking/workcell.json
+```
+
+Each layer's placement is the pickup's reach replayed while holding the block: arm to the
+reach's start, the same reach, then **open** the claw where the pickup closed it, then retreat
+in a straight line back and up to the start (the pickup's own pull-back along the floor is not
+replayed: with an open claw it would drag the placed block). Layers 2 and 3 end the reach
+25 and 50 mm higher (arm coordinates are mm from the arm base); the start stays the same, so
+every layer aligns to the same marker view. From the 2026-10-15 recording: release at
+(137, -30), (137, -5), (137, 20). It also writes the carry check (hold the block, arm at the
+reach start) and switches the grip check to the floor rule.
+
+**Grip check — the floor rule:** while carrying (the carry route, the check pose) every fresh
+sharp frame is checked; the carried color seen in the floor region (lower 60% of the image)
+on 3 frames in a row means it was dropped or missed, and the pickup is retried. Not seen
+counts as held: the lifted block is above the camera's view, and the tower check after
+placing confirms it arrived.
+
+**Marker view for placing:** stand the printed marker beside the stack spot, put a spare block
+on the spot, hold A so the robot aligns to it exactly as for a pickup, then (with the teleop
+video stream running) capture the marker as seen from there for all layers:
+
+```bash
+python3 scripts/stacking/stack_boxes.py --capture-approach --source http://127.0.0.1:8090/stream \
+  --config ~/xgo_teach/stacking/workcell.json
+```
+
 While teaching, list everything still missing, invalid or unreviewed in one pass (read-only,
 no camera or motors; exit 0 only when the workcell is complete):
 
