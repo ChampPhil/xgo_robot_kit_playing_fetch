@@ -260,7 +260,7 @@ class ObserverTests(unittest.TestCase):
 
 class GyroAlignerTests(Harness):
     def test_partial_grasp_residual_is_not_accepted_as_aligned(self):
-        for eu, eh in ((-0.03, -0.07), (-0.03, 0.0), (0.0, -0.07)):
+        for eu, eh in ((-0.03, -0.07), (-0.04, 0.0), (0.0, -0.07)):  # 2026-10-26 residual
             with self.subTest(eu=eu, eh=eh):
                 self.make(bearing=eu * FOV, distance=K / (0.24 * (1 + eh)))
                 self.calibrated()
@@ -283,21 +283,19 @@ class GyroAlignerTests(Harness):
         self.assertNotEqual(self.aligner.phase, "aligned")
         self.assertEqual(self.aligner.in_tol, 1)
 
-    def test_an_out_of_tolerance_frame_cannot_average_into_alignment(self):
+    def test_a_settled_look_counts_by_its_mean(self):
+        # 2026-10-30: requiring every frame inside 2% meant alignment often never finished
         self.make(bearing=0.0, distance=K / 0.24)
         self.calibrated()
         self.aligner.begin()
         self.aligner.phase = "align"
         self.aligner.align_started = self.clock()
         value = self.robot.view()
-        value["u"] = 0.519
-        # These frames pass the observer's 0.02 agreement check. Their mean is within
-        # the final 0.02 tolerance, but one actual frame is outside it.
-        value["samples"] = (dict(value, u=0.510), dict(value, u=0.528))
-        for _ in range(4):
+        value["u"] = 0.515
+        value["samples"] = (dict(value, u=0.505), dict(value, u=0.535))  # one frame at 3.5%
+        for _ in range(3):
             self.aligner.on_align("ok", value, self.clock())
-        self.assertNotEqual(self.aligner.phase, "aligned")
-        self.assertEqual(self.aligner.in_tol, 0)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-3:])
 
     def test_confirmation_waits_for_three_separated_observations(self):
         self.make(bearing=0.0, distance=K / 0.24)
@@ -367,6 +365,7 @@ class GyroAlignerTests(Harness):
 
     def test_unachievable_precision_stops_before_replay_or_repeated_oscillation(self):
         self.make(bearing=-15, distance=0.5, view_gain=2.5, coast=6)
+        self.aligner.tol = {"u": 0.02, "h": 0.04, "v": 0.025}  # strict enough to be unreachable
         self.calibrated()
         self.run_until(45)
         self.assertFalse(self.aligner.active, self.log)
@@ -462,6 +461,29 @@ class GyroAlignerTests(Harness):
         self.run_until(90)
         self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
         self.assertTrue(all(d > DEAD for d in self.robot.turn_durations), self.robot.turn_durations)
+
+    def test_starting_close_the_first_step_is_gentle(self):
+        self.make(bearing=0.0, distance=K / 0.21)
+        self.calibrated()
+        self.run_until(40)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertGreater(self.robot.closest, K / (REFERENCE["features"]["h"] * 1.15),
+                           self.log)  # never more than 15% too close
+
+    def test_close_to_the_box_growing_errors_do_not_stop_it(self):
+        self.make()
+        self.calibrated()
+        self.run_until(2, stop_when_aligned=False)
+        aligner = self.aligner
+        aligner.prev_norm, aligner.grow = 0.05, 2  # two small worsenings already
+        aligner.phase, aligner.align_started = "align", self.clock.now
+        aligner.previous, aligner.last_move = None, None
+        aligner.legs.stop()
+        aligner.moving = None
+        close = {"u": REFERENCE["features"]["u"] + 0.05, "v": REFERENCE["features"]["v"],
+                 "h": REFERENCE["features"]["h"] * 0.97}
+        aligner.on_align("ok", close, self.clock.now)
+        self.assertTrue(aligner.active, self.log[-3:])
 
     def test_small_corrections_do_not_swing_back_and_forth(self):
         # measured 2026-10-23: 5-6 deg commands turned 10-11 deg; eight turns to settle

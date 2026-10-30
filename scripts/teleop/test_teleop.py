@@ -1120,7 +1120,7 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual((args.align_motion, args.recalibrate, args.align_turn, args.align_walk,
                           args.tol_u, args.tol_h, args.tol_v, args.align_max_moves,
                           args.align_max_seconds),
-                         (False, False, 40, 12, 0.02, 0.04, 0.025, 25, 45))
+                         (False, False, 40, 12, 0.03, 0.06, 0.04, 25, 45))
         with patch("sys.stderr", io.StringIO()):
             for argv in (["--align-turn", "100"], ["--tol-u", "0"], ["--align-walk", "30"]):
                 with self.assertRaises(SystemExit):

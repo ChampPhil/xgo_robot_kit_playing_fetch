@@ -21,8 +21,10 @@ from heading import angle_diff  # noqa: F401  (also used by callers as align.ang
 from teach import write_json_atomic
 
 CALIBRATION_VERSION = 2
-# Used in the successful 2026-10-26 pickup; repeatability across positions is unmeasured.
-DEFAULT_TOL = {"u": 0.02, "h": 0.04, "v": 0.025}
+# Between the 2026-10-23 rule (4% / 8%: always tried, one partial grab) and the 2026-10-26 one
+# (2% / 4% on every frame: often never finished, the gait lands within about +-4 mm at random).
+DEFAULT_TOL = {"u": 0.03, "h": 0.06, "v": 0.04}
+NEAR = 0.15  # combined error below which the robot is close: no "error grew" stop there
 
 
 def errors(features, reference):
@@ -613,11 +615,7 @@ class GyroAligner:
                 self.abort("view mismatch: the box is the right size but at a different height "
                            "in the image (check kneel, arm, floor and box)")
                 return
-            samples = value.get("samples", (value,))
-            precise = all(within(errors(sample, self.ref), self.tol)
-                          and abs(sample["v"] - self.ref["v"]) <= self.tol["v"]
-                          for sample in samples)
-            self.in_tol = self.in_tol + 1 if precise else 0
+            self.in_tol += 1  # each look is already the mean of two agreeing still frames
             if self.in_tol >= self.CONFIRM_LOOKS:
                 self.legs.stop()
                 self.phase = "aligned"
@@ -631,7 +629,7 @@ class GyroAligner:
         growing = self.prev_norm is not None and norm > self.prev_norm + 0.01
         self.grow = self.grow + 1 if growing else 0
         self.prev_norm = norm
-        if self.grow >= 3:
+        if self.grow >= 3 and norm > NEAR:  # close by, the gait's random +-4 mm is no fault
             self.abort("error grew 3 moves in a row; something moves the wrong way "
                        "(try --recalibrate)")
             return
@@ -658,6 +656,9 @@ class GyroAligner:
 
     def plan_walk(self, h, eh):
         """(direction, seconds of actual walking, speed fraction) for the next segment."""
+        if self.walk_rate is None and abs(eh) < self.PRECISE_WALK_ERROR:
+            # already close: a full-speed probe would overshoot (eh -0.12 -> +1.3 in the sim)
+            return (1 if eh < 0 else -1), 0.4, self.PRECISE_AMOUNT
         if self.walk_rate is None:  # first segment: a modest probe
             seconds = 1.0 if self.max_forward is None or eh > 0 else min(1.0, self.max_forward)
             amount = 1.0 if seconds >= self.MIN_WALK * 2 else self.FINE_AMOUNT
