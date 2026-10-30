@@ -39,7 +39,8 @@ def errors(features, reference):
 
 def within(error, tol):
     """True when the driven errors (eu, eh) are inside tolerance; ev is checked separately.
-    eh may go down to -tol["h_far"] (too far) and up to tol["h"] (too close)."""
+    eh may go down to -tol["h_far"] (too far) and up to tol["h"] (too close); a negative h_far
+    demands the box look at least that much bigger (stand closer than when recorded)."""
     return (abs(error[0]) <= tol["u"]
             and -tol.get("h_far", tol["h"]) <= error[1] <= tol["h"])
 
@@ -164,7 +165,7 @@ class GyroAligner:
     def __init__(self, legs, pose, observer, read_yaw, reference, calibration_path, log, clock,
                  motion=False, recalibrate=False, settle=0.7, speeds=None, tol=None,
                  max_seconds=45.0, max_moves=25, prepare_settle=1.0, drift=None,
-                 gyro_sign_learned=None, target="box"):
+                 gyro_sign_learned=None, target="box", aim=AIM_H):
         self.legs = legs
         self.pose = pose
         self.observer = observer
@@ -184,6 +185,7 @@ class GyroAligner:
         self.drift = drift or (lambda: 0.0)  # gyro drift in deg/s (None until measured)
         self.gyro_sign_learned = gyro_sign_learned  # tell heading hold the checked direction
         self.target = target  # what is aligned to, for messages ("box", "marker")
+        self.aim = aim  # walk toward a box this much bigger than the reference (closer)
         self.active = False
         self.refused = False
         self.phase = None
@@ -669,7 +671,7 @@ class GyroAligner:
             seconds = 1.0 if self.max_forward is None or eh > 0 else min(1.0, self.max_forward)
             amount = 1.0 if seconds >= self.MIN_WALK * 2 else self.FINE_AMOUNT
             return (1 if eh < 0 else -1), max(self.MIN_WALK, seconds / amount), amount
-        needed = walk_seconds(h, self.ref["h"] * (1 + AIM_H), self.walk_rate)
+        needed = walk_seconds(h, self.ref["h"] * (1 + self.aim), self.walk_rate)
         direction = 1 if needed > 0 else -1
         seconds = abs(needed) * 0.9  # undershoot slightly; the next look corrects
         if direction > 0 and self.max_forward is not None:

@@ -28,7 +28,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "sensor_monitor"))
 
 from actions import BARK_SOUND, Barker, Fetcher, FullReset, ResetButton  # noqa: E402
-from align import (DEFAULT_TOL, alignment_legs_driver, alignment_measure,  # noqa: E402
+from align import (AIM_H, DEFAULT_TOL, alignment_legs_driver, alignment_measure,  # noqa: E402
                    alignment_reference)
 from body import (ARM_LIMITS, ARM_REACH, LIMITS, ArmController, Driver,  # noqa: E402
                   LegStepper, PosePreparer, Posture, Ramp, robot_state, scale)
@@ -154,8 +154,11 @@ def build_parser():
              "aligned when the box centre is this close (image width)"),
             ("tol-h", DEFAULT_TOL["h"], 0.02, 0.3,
              "aligned when the box looks at most this much too big (fraction)"),
-            ("tol-h-far", DEFAULT_TOL["h_far"], 0.0, 0.3,
-             "aligned only if the box looks at most this much too small (too far)"),
+            ("tol-h-far", DEFAULT_TOL["h_far"], -0.2, 0.3,
+             "aligned only if the box looks at most this much too small (too far); negative: "
+             "at least this much too big (stand closer than when recorded)"),
+            ("align-aim", AIM_H, -0.1, 0.3,
+             "walk toward a box this much bigger than in the recording (closer)"),
             ("tol-v", DEFAULT_TOL["v"], 0.01, 0.2,
              "allowed vertical difference before 'view mismatch'"),
             ("align-max-moves", 25, 5, 100, "give up after this many alignment moves"),
@@ -435,7 +438,7 @@ def main(argv=None):
             speeds=speeds, tol={"u": args.tol_u, "h": args.tol_h, "h_far": args.tol_h_far,
                                 "v": args.tol_v},
             max_seconds=args.align_max_seconds, max_moves=int(args.align_max_moves),
-            drift=lambda: hold.bias, gyro_sign_learned=hold.adopt_sign)
+            drift=lambda: hold.bias, gyro_sign_learned=hold.adopt_sign, aim=args.align_aim)
         fullreset = FullReset(dog, driver, arm, posture, ramp, log)
         delivery = None
         if args.deliver:

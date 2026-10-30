@@ -200,6 +200,11 @@ class MathTests(unittest.TestCase):
         self.assertTrue(align.within((0.0, +0.05), tol))
         self.assertFalse(align.within((0.0, +0.07), tol))
 
+    def test_a_negative_far_limit_demands_the_box_look_bigger(self):
+        tol = dict(align.DEFAULT_TOL, h=0.10, h_far=-0.03)  # stand 3-10% closer than recorded
+        self.assertFalse(align.within((0.0, 0.0), tol))
+        self.assertTrue(align.within((0.0, 0.05), tol))
+
     def test_walk_time_from_inverse_size(self):
         # 1/h falls linearly while walking: from h=0.03 (1/h=33.3) to 0.24 (4.17) at 10 per s
         self.assertAlmostEqual(align.walk_seconds(0.03, 0.24, 10.0), 2.916, places=2)
@@ -479,6 +484,15 @@ class GyroAlignerTests(Harness):
                 self.run_until(90)
                 self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
                 self.assertGreaterEqual(self.robot.errors()[1], -0.02, self.log[-4:])
+
+    def test_aiming_closer_stops_closer(self):
+        self.make(bearing=10.0, distance=0.5)
+        self.aligner.tol = dict(align.DEFAULT_TOL, h=0.10, h_far=-0.03)
+        self.aligner.aim = 0.06
+        self.calibrated()
+        self.run_until(90)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertGreaterEqual(self.robot.errors()[1], 0.03 - 0.005, self.log[-4:])
 
     def test_starting_close_the_first_step_is_gentle(self):
         self.make(bearing=0.0, distance=K / 0.21)
