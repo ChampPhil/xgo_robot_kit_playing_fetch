@@ -139,12 +139,6 @@ class GyroAligner:
     PRECISE_TURN = 6.0
     PRECISE_AMOUNT = 0.25
     PRECISE_WALK_ERROR = 0.15
-    # Close to the box, centre with quarter-speed side steps, not turns: measured 2026-10-30,
-    # small turns shuffle the robot back ~5 mm (right turns barely turn) while a side step
-    # moves the box ~0.02 of the image width per 0.2 s of stepping with little backing up.
-    SIDE_ZONE = {"u": 0.08, "h": 0.15}
-    SIDE_RATE = 0.1  # eu per second of quarter-speed side stepping (start; then learned)
-    MIN_SIDE, MAX_SIDE = 0.15, 0.6
     CONFIRM_LOOKS = 3
     CONFIRM_GAP = 0.25  # fresh, stopped looks spread out before handing over to replay
     TURN_RATE = 0.8  # deg/s per unit of turn speed (probe), only for turn deadlines
@@ -247,7 +241,6 @@ class GyroAligner:
         # Walking from a kneel starts later than turning (a 1.0 s walk did not move at all,
         # 2026-10-21): learned upwards when a walk leaves the box's size unchanged.
         self.walk_dead = self.DEAD
-        self.side_rate = self.SIDE_RATE
         self.backups, self.max_forward = 0, None
         self.search_levels, self.search_moves, self.scans = None, 0, 0
         self.phase = "initial"
@@ -317,13 +310,12 @@ class GyroAligner:
             self.turn["at_stop"] = progress
             self.observer.begin(now + self.settle)
 
-    def start_walk(self, direction, seconds, amount, now, primitive="forward"):
-        """primitive "strafe": sideways, direction +1 = left."""
-        self.legs.step(primitive, direction * amount)
+    def start_walk(self, direction, seconds, amount, now):
+        self.legs.step("forward", direction * amount)
         self.walk = {"until": now + self.walk_dead + seconds, "seconds": seconds,
                      "direction": direction, "amount": amount}
         self.moving = "walk"
-        self.last_move = ("walk" if primitive == "forward" else primitive, direction, seconds)
+        self.last_move = ("walk", direction, seconds)
 
     def tick(self, now):
         if self.phase == "aligned":
@@ -528,11 +520,6 @@ class GyroAligner:
                     self.turn_gain))
             else:
                 self.precision_reversals = 0
-        if self.last_move[0] == "strafe":  # stepping left moves the box right in the image
-            moved = (value["u"] - self.previous["u"]) * self.walk["direction"]
-            if moved > 0.003:
-                rate = moved / self.walk["seconds"]
-                self.side_rate = 0.5 * (self.side_rate + rate)
         if self.last_move[0] == "turn" and self.turn.get("at_stop", 0.0) >= 1.0:
             yaw = self.yaw()  # learn the coast only from turns that really moved
             if yaw is not None:
@@ -652,15 +639,6 @@ class GyroAligner:
         if self.moves > self.max_moves:
             self.abort(f"not aligned after {self.max_moves} moves")
             return
-        if (abs(eu) > self.tol["u"] and abs(eu) <= self.SIDE_ZONE["u"]
-                and abs(eh) < self.SIDE_ZONE["h"] and "strafe" in self.speeds):
-            direction = -1 if eu > 0 else 1  # box right of target: step right
-            seconds = max(self.MIN_SIDE, min(self.MAX_SIDE, 0.8 * abs(eu) / self.side_rate))
-            self.log("ALIGN {}: eu={:+.3f} eh={:+.3f} -> step {} {:.2f} s (quarter speed)"
-                     .format(self.moves, eu, eh, "left" if direction > 0 else "right",
-                             seconds))
-            self.start_walk(direction, seconds, self.PRECISE_AMOUNT, now, primitive="strafe")
-            return
         if abs(eu) > self.tol["u"]:
             degrees = -eu * self.calibration["deg_per_u"] * self.turn_gain
             degrees = max(-self.MAX_CORRECTION, min(self.MAX_CORRECTION, degrees))
@@ -680,9 +658,6 @@ class GyroAligner:
 
     def plan_walk(self, h, eh):
         """(direction, seconds of actual walking, speed fraction) for the next segment."""
-        if self.walk_rate is None and abs(eh) < self.PRECISE_WALK_ERROR:
-            # already close: a full-speed probe would overshoot (eh -0.12 -> +1.3 in the sim)
-            return (1 if eh < 0 else -1), 0.4, self.PRECISE_AMOUNT
         if self.walk_rate is None:  # first segment: a modest probe
             seconds = 1.0 if self.max_forward is None or eh > 0 else min(1.0, self.max_forward)
             amount = 1.0 if seconds >= self.MIN_WALK * 2 else self.FINE_AMOUNT

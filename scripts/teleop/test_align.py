@@ -32,7 +32,7 @@ class GyroSim:
 
     def __init__(self, clock, bearing=20.0, distance=0.6, gyro_sign=1, walk_per_speed=0.0042,
                  legs_sign=1, gyro_drift=0.0, coast=0.0, walk_dead=DEAD, hidden_above_h=None,
-                 clipped_above_h=None, visible=None, view_gain=1.0, turn_backstep=0.0):
+                 clipped_above_h=None, visible=None, view_gain=1.0):
         self.clock = clock
         self.x = self.y = 0.0
         self.psi = 0.0  # heading, degrees, counter-clockwise positive
@@ -51,7 +51,6 @@ class GyroSim:
         self.clipped_above_h = clipped_above_h  # closer: cut off by the bottom of the image
         self.visible = visible  # (kneel, distance) -> whether the camera can see the box
         self.kneel = 1.0
-        self.turn_backstep = turn_backstep  # m a turn shuffles the robot back (2026-10-30)
         self.view_gain = view_gain  # near targets can move farther in the image per gyro degree
 
     # --- legs -----------------------------------------------------------------------------
@@ -69,9 +68,6 @@ class GyroSim:
                 self.turn_durations.append(self.clock() - self.started)
                 if self.clock() - self.started > DEAD:
                     self.psi += self.coast * self.command[1] * self.legs_sign * self.fraction
-                    back = math.radians(self.psi + 180)
-                    self.x += self.turn_backstep * math.cos(back)
-                    self.y += self.turn_backstep * math.sin(back)
             self.stopped_at = self.clock()
         self.command = None
 
@@ -466,18 +462,6 @@ class GyroAlignerTests(Harness):
         self.run_until(90)
         self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
         self.assertTrue(all(d > DEAD for d in self.robot.turn_durations), self.robot.turn_durations)
-
-    def test_close_to_the_box_it_centres_with_side_steps_not_turns(self):
-        # measured 2026-10-30: quarter-speed turns shuffle the robot back ~5 mm (and right
-        # turns barely turn); side steps move the box ~0.02 of the width with little backing
-        self.make(bearing=4.0, distance=K / 0.21, turn_backstep=0.005)
-        self.calibrated()
-        took = self.run_until(60)
-        self.assertEqual(self.aligner.phase, "aligned", self.log[-8:])
-        close = [line for line in self.log if line.startswith("ALIGN ")]
-        self.assertFalse([line for line in close if "-> turn" in line], close)
-        self.assertTrue([line for line in close if "-> step" in line], close)
-        self.assertLess(took, 40, close)
 
     def test_small_corrections_do_not_swing_back_and_forth(self):
         # measured 2026-10-23: 5-6 deg commands turned 10-11 deg; eight turns to settle
