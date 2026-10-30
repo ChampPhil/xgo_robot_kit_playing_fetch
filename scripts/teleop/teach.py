@@ -365,15 +365,23 @@ class Replayer:
         self.index = 0
         self.active = True
 
+    CLAW_SETTLE = 3.0  # a claw move waits up to this long after the last other move
+
     def shorten(self, events):
-        """Cap idle pauses (including the wait before the first move) at max_gap seconds."""
+        """Cap idle pauses (including the wait before the first move) at max_gap seconds. The
+        pause before a claw move keeps up to CLAW_SETTLE: cut to 0.5 s, the claw closed while
+        the arm was still reaching for the block (2026-10-30)."""
         if not self.max_gap:
             return events
-        shortened, previous, when, walking = [], 0.0, 0.0, False
+        shortened, previous, when, walking, last_claw = [], 0.0, 0.0, False, False
         for event in events:
             gap = event["t"] - previous
-            when += gap if walking else min(gap, self.max_gap)  # walking time is not a pause
+            cap = self.max_gap
+            if "claw" in event and not last_claw:
+                cap = max(cap, self.CLAW_SETTLE)
+            when += gap if walking else min(gap, cap)  # walking time is not a pause
             previous = event["t"]
+            last_claw = "claw" in event
             if "walk" in event:
                 walking = any(event["walk"].values())
             shortened.append(dict(event, t=round(when, 3)))

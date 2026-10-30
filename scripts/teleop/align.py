@@ -23,11 +23,12 @@ from teach import write_json_atomic
 CALIBRATION_VERSION = 2
 # Between the 2026-10-23 rule (4% / 8%: always tried, one partial grab) and the 2026-10-26 one
 # (2% / 4% on every frame: often never finished, the gait lands within about +-4 mm at random).
-# h_far: the box may look at most this much too small (the robot too far). Every grab accepted
-# on the short side (-0.029 .. -0.059) caught the edge, slipped or missed; clean ones were at
-# -0.017 and +0.000. The recorded grab is at the arm's reach limit, so short cannot be made up.
-DEFAULT_TOL = {"u": 0.03, "h": 0.06, "h_far": 0.02, "v": 0.04}
-AIM_H = 0.015  # walk toward a box this much bigger than the reference: err on the close side
+# h_far: the box may look at most this much too small (the robot too far; negative: it must
+# look bigger). The recorded grab is at the arm's reach limit, so short cannot be made up.
+# 2026-10-30 trials: accepted at eh -0.059 .. -0.008 the claw came down short or caught the
+# edge; at +0.059 it was far too close; at +0.033 the block was in the claw.
+DEFAULT_TOL = {"u": 0.03, "h": 0.04, "h_far": 0.0, "v": 0.04}
+AIM_H = 0.02  # walk toward a box this much bigger than the reference: a little closer
 NEAR = 0.15  # combined error below which the robot is close: no "error grew" stop there
 
 

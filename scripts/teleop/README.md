@@ -192,14 +192,18 @@ with no drift**. Alignment therefore:
   photo is re-measured with the same detector so sizes compare like for like.
 - **Display-only by default:** without `--align-motion`, holding A only logs the error and the
   move it would make.
-- Aligned = box centre within `--tol-u` (0.02 of image width), size within `--tol-h` (4%), and
-  vertical centre within `--tol-v` (0.025 of image height). It requires three consecutive
-  stopped observations, spaced at least 0.25 s apart; **both frames** of each observation
-  must meet the tolerances. A lost detection clears the confirmation count. At 640×480,
-  these centre tolerances are 12.8 px horizontally and 12 px vertically.
+- Aligned = box centre within `--tol-u` (0.03 of image width), vertical centre within
+  `--tol-v` (0.04 of image height), and size between the recording's and up to `--tol-h` (4%)
+  bigger: `--tol-h-far` (0) is how much *smaller* it may look, negative = it must look bigger.
+  Walks aim `--align-aim` (2%) bigger, i.e. a little closer than when recorded: the recorded
+  grab is at the arm's reach limit, so stopping short cannot be made up (2026-10-30 trials:
+  −6 … −1% came down short, +6% far too close, +3% put the block in the claw). Three
+  consecutive settled looks, each the mean of two agreeing still frames, 0.25 s apart; a lost
+  detection clears the count.
 - It stops and says why on release, any manual input, no commands for 0.5 s, the
-  box lost 3 times, a stalled camera, the error growing 3 moves in a row, `--align-max-moves`
-  (25) or `--align-max-seconds` (45), or "view mismatch" (right size, wrong height in the image).
+  box lost 3 times, a stalled camera, the error growing 3 moves in a row while still far,
+  `--align-max-moves` (25) or `--align-max-seconds` (45), or "view mismatch" (right size,
+  wrong height in the image). Not in view at all: other kneel levels, then 45° turns all around.
   Two consecutive minimum-size turns that still cross outside tolerance also stop alignment;
   it does not relax the tolerance and replay anyway.
 
@@ -216,7 +220,11 @@ orientation, or the camera-to-arm transform.
 Tuning: `--align-turn` (40), `--align-walk` (12). Floor only, supervised, within reach.
 
 **Replays are shortened:** pauses longer than `--replay-max-gap` (0.5 s) between recorded moves,
-including the wait before the first move, are cut to 0.5 s (`0` keeps the original timing).
+including the wait before the first move, are cut to 0.5 s (`0` keeps the original timing) —
+except the pause before a claw move, which keeps up to 3 s: cut short, the claw closed while
+the arm was still reaching (2026-10-30). After a fetch's pickup the log reports where the claw
+servo stopped (`claw servo at N/255`): near 255 the jaws closed fully (the block was not between
+them or slipped out); well below, something blocked them.
 
 ## Live video
 

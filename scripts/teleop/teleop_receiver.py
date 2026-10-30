@@ -27,7 +27,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "sensor_monitor"))
 
-from actions import BARK_SOUND, Barker, Fetcher, FullReset, ResetButton  # noqa: E402
+from actions import (BARK_SOUND, Barker, Fetcher, FullReset, ResetButton,  # noqa: E402
+                     make_claw_reader)
 from align import (AIM_H, DEFAULT_TOL, alignment_legs_driver, alignment_measure,  # noqa: E402
                    alignment_reference)
 from body import (ARM_LIMITS, ARM_REACH, LIMITS, ArmController, Driver,  # noqa: E402
@@ -463,7 +464,8 @@ def main(argv=None):
             log("Delivery on: after a pickup, F lines up with the marker and puts the block "
                 "down.")
         fetcher = Fetcher(fullreset, aligner, controller, log, time.monotonic,
-                          motion=args.align_motion, deliver=delivery)
+                          motion=args.align_motion, deliver=delivery,
+                          claw_reading=make_claw_reader(dog.ser))
         try:
             run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
                 ramp=ramp, posture=posture, teach=controller,

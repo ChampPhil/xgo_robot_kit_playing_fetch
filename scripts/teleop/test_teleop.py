@@ -841,6 +841,16 @@ class ReceiverTests(unittest.TestCase):
         self.assertFalse(self.picked_up(fetcher))
         self.assertIs(fetcher.active_aligner, self.aligner)
 
+    def test_fetch_logs_where_the_claw_stopped_after_the_grab(self):
+        for reading, expected in ((lambda: 251, "claw servo at 251/255"),
+                                  (lambda: (_ for _ in ()).throw(OSError("no reply")),
+                                   "claw position unreadable")):
+            self.log.clear()
+            fetcher = self.make_fetcher()
+            fetcher.claw_reading = reading
+            self.assertFalse(self.picked_up(fetcher))
+            self.assertTrue(any(expected in entry for entry in self.log), self.log)
+
     def test_fetch_stops_if_the_replay_cannot_start(self):
         fetcher = self.make_fetcher()
         self.teach.start_replay = lambda fetch=False: self.events.append("no recording")
@@ -1120,7 +1130,7 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual((args.align_motion, args.recalibrate, args.align_turn, args.align_walk,
                           args.tol_u, args.tol_h, args.tol_v, args.align_max_moves,
                           args.align_max_seconds),
-                         (False, False, 40, 12, 0.03, 0.06, 0.04, 25, 45))
+                         (False, False, 40, 12, 0.03, 0.04, 0.04, 25, 45))
         with patch("sys.stderr", io.StringIO()):
             for argv in (["--align-turn", "100"], ["--tol-u", "0"], ["--align-walk", "30"]):
                 with self.assertRaises(SystemExit):

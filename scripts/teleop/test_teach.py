@@ -434,11 +434,25 @@ class ReplayTests(unittest.TestCase):
         replayer = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=0,
                                   max_gap=0.5)
         replayer.start(motion)
-        self.assertEqual([round(e["t"], 3) for e in replayer.events], [0.5, 0.6, 1.1, 1.2])
-        self.assertAlmostEqual(replayer.duration, 1.2)
+        # the 3.6 s before the claw closes is kept up to 3 s: the arm must arrive first
+        self.assertEqual([round(e["t"], 3) for e in replayer.events], [0.5, 0.6, 3.6, 3.7])
+        self.assertAlmostEqual(replayer.duration, 3.7)
         original = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=0, max_gap=0)
         original.start(motion)
         self.assertEqual([e["t"] for e in original.events], [5.3, 5.4, 9.0, 9.1])
+
+    def test_the_claw_waits_for_the_arm_but_other_pauses_shrink(self):
+        # 2026-10-30: shortened to 0.5 s, the claw closed while the arm was still reaching
+        motion = dict(MOTION, events=[{"t": 2.0, "arm": [137, -30]}, {"t": 6.0, "claw": 200},
+                                      {"t": 6.2, "claw": 255}, {"t": 12.0, "arm": [0, 80]},
+                                      {"t": 20.0, "claw": 0}])
+        replayer = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=0,
+                                  max_gap=0.5)
+        replayer.start(motion)
+        times = [e["t"] for e in replayer.events]
+        self.assertEqual(times[:3], [0.5, 3.5, 3.7])  # 4 s before the close -> 3 s
+        self.assertEqual(times[3], 4.2)  # an idle pause after the grab still shrinks
+        self.assertEqual(times[4], 7.2)  # the claw opening also waits for the arm
 
     def test_shortening_never_cuts_walking_time(self):
         motion = dict(MOTION, events=[{"t": 1.0, "walk": {"x": 12, "y": 0, "yaw": 0}},
@@ -447,8 +461,9 @@ class ReplayTests(unittest.TestCase):
         replayer = teach.Replayer(self.arm, self.posture, clock=self.clock, settle=0,
                                   max_gap=0.5)
         replayer.start(motion)
-        # idle lead-in capped to 0.5 s; the 2.5 s of walking kept; the idle wait capped again
-        self.assertEqual([e["t"] for e in replayer.events], [0.5, 3.0, 3.5])
+        # idle lead-in capped to 0.5 s; the 2.5 s of walking kept; the wait before the claw
+        # move keeps up to 3 s
+        self.assertEqual([e["t"] for e in replayer.events], [0.5, 3.0, 6.0])
 
     def test_replay_skips_unknown_start_pose_and_abort_stops(self):
         self.replayer.start(dict(MOTION, start={"arm": None, "claw": None, "kneel": 0.0}))

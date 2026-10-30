@@ -194,11 +194,14 @@ class MathTests(unittest.TestCase):
     def test_too_far_has_its_own_tighter_limit(self):
         # 2026-10-30: every short-side acceptance (-0.029 .. -0.059) grabbed the edge,
         # slipped or missed; clean grabs were at -0.017 and +0.000
+        # then attempt 7 (eh -0.008) was slightly short and attempt 8 (+0.059) far too close;
+        # attempt 9 (+0.033) put the block in the claw: default window 0 .. +4%, aim +2%
         tol = dict(align.DEFAULT_TOL)
-        self.assertFalse(align.within((0.0, -0.03), tol))
-        self.assertTrue(align.within((0.0, -0.015), tol))
-        self.assertTrue(align.within((0.0, +0.05), tol))
-        self.assertFalse(align.within((0.0, +0.07), tol))
+        self.assertFalse(align.within((0.0, -0.01), tol))
+        self.assertTrue(align.within((0.0, 0.0), tol))
+        self.assertTrue(align.within((0.0, +0.035), tol))
+        self.assertFalse(align.within((0.0, +0.05), tol))
+        self.assertEqual(align.AIM_H, 0.02)
 
     def test_a_negative_far_limit_demands_the_box_look_bigger(self):
         tol = dict(align.DEFAULT_TOL, h=0.10, h_far=-0.03)  # stand 3-10% closer than recorded

@@ -3,8 +3,10 @@
 Latest continuation handoff: [HANDOFF-2026-10-29.md](HANDOFF-2026-10-29.md). Read it first for
 the interrupted setup work, newer uncommitted edits and latest disk/connectivity observations.
 
-Last updated 2026-10-29. Code: `scripts/teleop/` and `scripts/stacking/`; robot checkout
-`~/project/xgo_robot_kit_playing_fetch` last verified at `da99946` on 2026-10-26.
+Last updated 2026-10-30. Code: `scripts/teleop/` and `scripts/stacking/`. On the robot, the
+current code runs from the git worktree `~/project/deliver-test`; the main checkout
+`~/project/xgo_robot_kit_playing_fetch` holds the user's unpushed voice/xgo_robot commit and
+docs reorganisation and is not updated until that is pushed.
 Precision changes described below were deployed as a patch over that commit on 2026-10-26;
 240 teleop tests passed on the Pi, followed by a user-confirmed pickup with the new version.
 
@@ -61,14 +63,14 @@ motion. Recordings also store video + commands for training a model later.
 
 ## Open problems
 
-1. **Final alignment is too loose for repeatable pickup.** The partial-grasp trial ended at
-   eu −0.03 (about 19 px left at 640 px width) / eh −0.07 (7% smaller than reference).
-   That passed the deployed 4% horizontal / 8% size limits. It is evidence of residual
-   mismatch, not proof of the sole cause of the miss; grasp geometry is not calibrated.
-   Deployed changes halve the tolerances, require three separated observations with both raw
-   frames inside tolerance, damp turns after crossing the target, and use smaller/slower
-   corrections. If minimum turns still overshoot, alignment stops. One tighter-gate hardware
-   trial succeeded; repeatability across positions, lighting and orientations remains unmeasured.
+1. **The grab is not reliable yet (2026-10-30: 2 clean of ~9 floor attempts).** Alignment now
+   lands where it should (block centred and 0 … +4% bigger than in the recording; earlier
+   short-side acceptances came down short, +6% was far too close), but in the last attempt the
+   **claw stopped just short of gripping** although it is commanded to 255 (fully closed). Next:
+   read the claw servo after the grab (now logged after every fetch) — near 255 means the block
+   is not between the jaws or slips; well below means something blocks them (floor, edge). The
+   gait cannot place the body to better than about ±4 mm (measured), and blocks must be square
+   to the robot; a rotated block is not handled.
 2. **Heading hold** still curved; gyro drift is inconsistent. Possibly fine after the startup
    reset (drift 0 in the probe) — needs one straight-walk comparison with and without it.
 3. **Two people work on the robot checkout.** `scripts/xgo_robot/` has uncommitted edits on the
@@ -139,6 +141,10 @@ motion. Recordings also store video + commands for training a model later.
 | Date | What happened |
 | --- | --- |
 | 09-14 → 09-23 | Repository set up; connection attempts; Tailscale access for SSH documented |
+| 09-15 | Built-in QR-code Wi-Fi setup showed success but never connected (phone hotspot at 2.4 and 5 GHz, and the school network, which needs a web login) |
+| 09-16 | Over HDMI: Raspberry Pi OS; joined TrinityGuest from the terminal (the network manager must be re-enabled after boot); SSH blocked by the school network's per-device isolation; setting up a hotspot hung the robot (possibly memory, with a browser open) |
+| 09-17 | SSH still failed after admin updates; the hotspot was not detected (probably not on 2.4 GHz) → Tailscale chosen |
+| 09-18 | **Tailscale works**: the robot joins the tailnet on boot (scoped so it only reaches allowed devices); SSH to `pi@<robot Tailscale IP>`; a first test script streamed the camera to an .avi |
 | 09-28 | Basic movement test and movement CLI |
 | 09-29 | Camera colour-box detection; robot specs gathered |
 | 09-30 | Read-only sensor logger (battery, attitude, servo angles); single-colour detection; visual-alignment research; first claw open/close tests |
@@ -159,6 +165,7 @@ motion. Recordings also store video + commands for training a model later.
 | 10-29 | Fixes from the 10-23 failed fetch and a review of the 10-26 changes (offline only): bright floor (H106 S48 V135) no longer passes as a "too close" purple box — pale purple now counts only when dark (detector accepts several ranges per colour); quarter-speed final steps no longer count as "walk did not start" or as walking-speed samples; fetch aligns to and replays the newest *box* recording, so a newer route recording cannot hide it (Y still replays the newest). 246 teleop, 41 stacking, 9 detection tests pass. Not yet deployed: the Pi checkout carries copied-in files, so a plain `git pull` would conflict |
 | 10-29 | Stacking setup tools (offline): `--setup-report` lists every missing/invalid/unreviewed workcell item in one pass (the example: 40 missing, 8 unreviewed); `--import-recording SESSION --asset NAME` validates a teleop recording for its role, copies it (and a pickup's start reference) into `taught/<asset>/`, updates the workcell and leaves it unreviewed. 52 stacking tests pass |
 | 10-29 | Pushed; robot checkout fast-forwarded to `41b056b` (superseded copied-in files kept in `~/xgo_teach/pre-pull-copies-20261029`; `xgo_robot/`, `voice/` untouched); all 324 offline tests pass on the Pi. Disk: removed 4 old VS Code server versions, Chromium cache, apt cache and old journal logs: **3.8 GB free (73%)**, was 142 MB |
+| 10-30 | More pickup trials on the floor (block ~40 cm, not facing the windows). (6) close-side fix: aligned at eh −0.008 → still **short**; (7) original replay timing (no pause shortening) → still slightly short, and the block sat at the jaw tips; (8) aim +6%, accept +3 … +10% → eh +0.059, **far too close**; (9) aim +2%, accept 0 … +4% → eh +0.033, block in the claw but the **claw stopped just short of gripping**. The claw already gets 255 (fully closed, the library maximum). New defaults: size window 0 … +4%, aim +2%; replays keep up to 3 s before a claw move (other pauses still 0.5 s); after a fetch the log reports where the claw servo stopped, to tell a blocked claw from a block that is not between the jaws (not yet run: robot disconnected). Videos in `docs/visual_recordings/` with an index README (first committed compressed, then replaced by the full-quality originals plus the person-chase video for grading, `3de0da3`) |
 | 10-30 | Pickup trials with the 3%/6% rule: (1) clean, eh −0.038; (2) "error grew" after overshooting close, no grab; (3) slipped out, eh −0.029; (4) on a **tabletop** (stopped; robot moved to the floor) — table edge/chairs read as a 2nd purple box; (5a) facing bright windows, block ~1.5–2 m away, lost; (5b) missed short, eh −0.059. User: "always slightly behind the box". All short-side acceptances failed; clean grabs (10-23 +0.000, 10-26 −0.017). Now: box may look at most 2% too small (`h_far`, `--tol-h-far`), up to 6% too big; walks aim 1.5% close. Video of trial 1: robot `docs/visual_recordings/Fetch_Pickup_Success_2026-10-30.mp4` |
 | 10-30 | Gait measured next to the block (quarter speed, 3 each): small turns shuffle the robot back up to ~5 mm, right turns barely turn, side steps moved the box ±0.02, forward +1–4%; still-frame noise 0.15 px. Side-step centring built from that, then **reverted**: on the next pickup the side steps did nothing consistent. Two pickups gave up (34 and 22 moves) under the 10-26 strict rule (2%/4%, every frame). New acceptance: 3% / 6% (v 4%) on the mean of each of 3 settled looks; "error grew" stop only while far (combined error > 0.15); gentle first step when starting close. Plan: count 5 pickups in a row before changing more |
 | 10-30 | Supervised on hardware: fetch picked the block up (tight tolerances; the looser marker-capture ones made an earlier try miss), but the placement **jumped the arm from the carry pose (0,80) to (80,30) and flung the block**, and it placed where it picked up instead of at the marker. A block rotated ~20° also made a grab miss (alignment ignores rotation; square-on only for now). Fixed offline: the generated carry check now lowers the held block along an arc in ≤8 mm steps (~3 s); new `--deliver WORKCELL`: after F's pickup, find the marker (kneel levels, then 45° turns all around), line up with the captured view without moving the arm, then lower + place + retreat. 255 teleop, 65 stacking tests pass |

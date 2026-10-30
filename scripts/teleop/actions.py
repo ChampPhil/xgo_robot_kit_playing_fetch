@@ -74,7 +74,7 @@ class Fetcher:
     (it only releases held keys)."""
 
     def __init__(self, fullreset, aligner, teach, log, clock, motion, settle=1.5,
-                 align_status=None, deliver=None):
+                 align_status=None, deliver=None, claw_reading=None):
         self.fullreset = fullreset
         self.aligner = aligner
         self.teach = teach
@@ -85,6 +85,7 @@ class Fetcher:
         self.align_status = align_status or (lambda: (aligner.active,
                                                       aligner.phase == "aligned"))
         self.deliver = deliver
+        self.claw_reading = claw_reading  # () -> claw servo raw 0..255 (255 = fully closed)
         self.state = None
         self.seen = 0
 
@@ -152,6 +153,8 @@ class Fetcher:
             return True
         if self.teach.replayer.active:
             return True
+        if self.state == "replay":
+            self.report_claw()
         if self.state == "replay" and self.deliver is not None:
             self.state = "deliver_align"
             self.log("DELIVER: picked up; looking for the marker...")
@@ -160,6 +163,17 @@ class Fetcher:
         self.end("FETCH done: block delivered to the marker." if self.state == "deliver_place"
                  else "FETCH done.")
         return False
+
+    def report_claw(self):
+        """Where the claw servo stopped after the grab: near 255 it closed fully (the block is
+        not between the jaws, or slipped out); well below, something blocks the jaws."""
+        if self.claw_reading is None:
+            return
+        try:
+            self.log(f"FETCH: claw servo at {self.claw_reading()}/255 after the grab "
+                     "(255 = fully closed).")
+        except (OSError, TimeoutError, ValueError, IndexError) as exc:
+            self.log(f"FETCH: claw position unreadable ({exc}).")
 
     def start(self, manual=False):
         if not self.motion:
@@ -220,3 +234,22 @@ class Barker:
             self.playing = self.play()
         except OSError as exc:
             self.log(f"Cannot play bark ({exc}).")
+
+
+def make_claw_reader(connection, timeout=0.1):
+    """The claw servo's position (raw 0..255) with the sensor logger's validated protocol."""
+    from stream_sensors import MOTOR_ANGLES, XGOReader
+
+    reader = XGOReader(connection, timeout=timeout)
+
+    def read():
+        saved = getattr(connection, "timeout", None)
+        try:
+            if saved is not None:
+                connection.timeout = min(saved, 0.01)  # missing bytes cost `timeout`, not 0.5 s
+            return reader.read_register(MOTOR_ANGLES, 15)[12]  # 12 leg servos, then ID 51
+        finally:
+            if saved is not None:
+                connection.timeout = saved
+
+    return read
