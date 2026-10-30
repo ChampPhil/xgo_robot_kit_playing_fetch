@@ -7,6 +7,7 @@ is overwritten, and every touched "validated" flag is set false until reviewed o
 
 import copy
 import json
+import math
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ FLOOR_ROI = [0, 0.4, 1, 1]  # alignment's floor filter: the lifted box is in the
 RELEASE_AFTER = 0.5  # seconds at the release point before opening
 LIFT_AFTER = 1.0  # seconds after opening before moving away
 RETREAT_SECONDS, RETREAT_STEPS = 2.0, 10
+LOWER_STEP_MM, LOWER_STEP_SECONDS = 8.0, 0.25  # holding the block: small, slow steps
 LAYER_KEYS = {"to-stack": ("to_stack", "carry"), "place": ("place", "place"),
               "inspect": ("inspect", "inspect"), "return": ("return", "return"),
               "recover-drop": ("recover_drop", "recover")}
@@ -130,6 +132,35 @@ def raised(z, offset, near, far):
     return round(z + offset * share)
 
 
+def arc_path(a, b, step_mm=LOWER_STEP_MM):
+    """Arm poses from a to b around the arm base (angle and reach interpolated), so the path
+    stays in the reach ring where a straight line would cut inside it; steps <= step_mm."""
+    (ra, ta), (rb, tb) = [(math.hypot(x, z), math.atan2(z, x)) for x, z in (a, b)]
+    length = math.hypot(rb - ra, (ra + rb) / 2 * (tb - ta))
+    steps = max(1, math.ceil(length / step_mm))
+    path = []
+    for step in range(1, steps + 1):
+        share = step / steps
+        radius, angle = ra + (rb - ra) * share, ta + (tb - ta) * share
+        path.append([round(radius * math.cos(angle)), round(radius * math.sin(angle))])
+    path[-1] = list(b)
+    return path
+
+
+def lowering(pickup, start):
+    """The pickup ends with the block held up out of view; bring it to the placement start
+    slowly. One jump there flung the block (2026-10-30)."""
+    arms = [event["arm"] for event in sorted(pickup["events"], key=lambda e: e["t"])
+            if "arm" in event]
+    if not arms:
+        raise ValueError("the pickup recording has no arm moves")
+    path = arc_path(arms[-1], start["arm"])
+    return {"version": 1, "duration": round(LOWER_STEP_SECONDS * len(path), 3),
+            "start": {"arm": list(arms[-1]), "kneel": start["kneel"], "claw": None},
+            "events": [{"t": round(LOWER_STEP_SECONDS * (index + 1), 3), "arm": arm}
+                       for index, arm in enumerate(path)]}
+
+
 def placement(pickup, offset):
     """The pickup's reach replayed while holding, released where the claw closed, then a
     straight retreat back and up to the reach's start; the reach ends `offset` mm higher
@@ -173,8 +204,7 @@ def generate_placements(session, config):
             raise ValueError("layer %d (+%d mm): %s" % (index + 1, offset, exc)) from exc
         places.append(motion)
     start = places[0]["start"]
-    check = {"version": 1, "duration": 0.5, "start": dict(start),
-             "events": [{"t": 0.5, "arm": list(start["arm"])}]}  # hold the box, arm ready
+    check = lowering(pickup, start)  # holding the block: from the carry pose to the reach
     validate_motion(copy.deepcopy(check), "check")
     cell = load_cell(config)
     root = config.parent / "taught"

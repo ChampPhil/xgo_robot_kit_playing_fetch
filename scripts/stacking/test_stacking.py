@@ -5,6 +5,7 @@ import copy
 import io
 import itertools
 import json
+import math
 import tempfile
 import threading
 import unittest
@@ -605,6 +606,18 @@ class PlacementTests(unittest.TestCase):
                     profiles.setup_report(self.config, Perception())["items"]}
         self.assertEqual(statuses["layer 2 place motion"], "ok")
         self.assertEqual(statuses["verification check motion"], "ok")
+
+    def test_the_held_block_is_lowered_in_small_steps_not_thrown(self):
+        # 2026-10-30: one jump from the carry pose (0, 80) to (80, 30) flung the block
+        self.generate()
+        lower = json.loads((self.config.parent / "taught/carry-check/motion.json").read_text())
+        self.assertEqual(lower["start"]["arm"], [0, 80])  # where the pickup leaves the arm
+        path = [lower["start"]["arm"]] + [e["arm"] for e in lower["events"]]
+        self.assertEqual(path[-1], [80, 30])
+        self.assertTrue(all(math.hypot(b[0] - a[0], b[1] - a[1]) <= 10
+                            for a, b in zip(path, path[1:])), path)
+        self.assertGreaterEqual(lower["duration"], 2.0)
+        self.assertTrue(all(profiles.in_reach(*arm) for arm in path))
 
     def test_out_of_reach_or_existing_output_refused_and_nothing_written(self):
         far = copy.deepcopy(PICKUP)

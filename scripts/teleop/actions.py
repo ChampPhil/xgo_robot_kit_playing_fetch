@@ -68,11 +68,13 @@ class FullReset:
 
 class Fetcher:
     """F: full reset (camera pose = the reference's), settle, align without a button held,
-    then replay the recorded pickup. F again, any manual input or the watchdog cancels it;
-    clicking away from the keyboard window does not (it only releases held keys)."""
+    then replay the recorded pickup. With `deliver` (an aligner for the stacking marker and the
+    lower+place motion) it then lines up with the marker and puts the block down. F again, any
+    manual input or the watchdog cancels it; clicking away from the keyboard window does not
+    (it only releases held keys)."""
 
     def __init__(self, fullreset, aligner, teach, log, clock, motion, settle=1.5,
-                 align_status=None):
+                 align_status=None, deliver=None):
         self.fullreset = fullreset
         self.aligner = aligner
         self.teach = teach
@@ -82,6 +84,7 @@ class Fetcher:
         self.settle = settle
         self.align_status = align_status or (lambda: (aligner.active,
                                                       aligner.phase == "aligned"))
+        self.deliver = deliver
         self.state = None
         self.seen = 0
 
@@ -91,7 +94,12 @@ class Fetcher:
 
     @property
     def replaying(self):
-        return self.state == "replay"
+        return self.state in ("replay", "deliver_place")
+
+    @property
+    def active_aligner(self):
+        """The aligner moving the legs now (heading hold must not measure its turns)."""
+        return self.deliver.aligner if self.state == "deliver_align" else self.aligner
 
     def update(self, presses, manual, attended):
         """Call once per message. True while fetch owns the legs, arm and kneel."""
@@ -128,9 +136,29 @@ class Fetcher:
                 self.end("FETCH stopped: alignment did not finish (reason above)")
                 return False
             return True
+        if self.state == "deliver_align":
+            marker = self.deliver.aligner
+            active = marker.update(True, False)
+            if marker.phase == "aligned":
+                marker.update(False, False)  # hand the robot over to the placement
+                self.teach.replayer.start(self.deliver.motion)
+                self.state = "deliver_place"
+                self.log("DELIVER: lined up with the marker; lowering and placing the block...")
+                return True
+            if not active:
+                self.end("FETCH stopped: could not line up with the marker (reason above); "
+                         "still holding the block.")
+                return False
+            return True
         if self.teach.replayer.active:
             return True
-        self.end("FETCH done.")
+        if self.state == "replay" and self.deliver is not None:
+            self.state = "deliver_align"
+            self.log("DELIVER: picked up; looking for the marker...")
+            self.deliver.aligner.update(True, False)
+            return True
+        self.end("FETCH done: block delivered to the marker." if self.state == "deliver_place"
+                 else "FETCH done.")
         return False
 
     def start(self, manual=False):
@@ -155,7 +183,9 @@ class Fetcher:
     def cancel(self, reason):
         if self.state == "align":
             self.aligner.update(False, False)  # stops the legs
-        elif self.state == "replay" and hasattr(self.teach, "watchdog"):
+        elif self.state == "deliver_align":
+            self.deliver.aligner.update(False, False)
+        elif self.replaying and hasattr(self.teach, "watchdog"):
             self.teach.watchdog()  # aborts the replay and stops the legs
         self.end(f"FETCH cancelled: {reason}.")
 

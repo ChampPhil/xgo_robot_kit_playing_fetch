@@ -775,6 +775,72 @@ class ReceiverTests(unittest.TestCase):
         self.assertFalse(self.fetch_tick(fetcher, 1))
         self.assertTrue(any("FETCH done" in entry for entry in self.log))
 
+    def add_delivery(self, fetcher):
+        marker = SimpleNamespace(active=False, phase=None, moving=None, refuse=False)
+
+        def update(held, manual):  # like GyroAligner.update: True while it owns the robot
+            self.events.append(("marker", held, manual))
+            if not held or manual or marker.refuse:
+                marker.active, marker.phase = False, None
+                return False
+            marker.active = True
+            return True
+
+        marker.update = update
+        self.marker = marker
+
+        def start(motion):
+            self.events.append(("deliver-replay", motion))
+            self.replaying["on"] = True
+            self.teach.replayer.active = True
+
+        self.teach.replayer.start = start
+        fetcher.deliver = SimpleNamespace(aligner=marker, motion={"name": "lower+place"})
+        return fetcher
+
+    def picked_up(self, fetcher):
+        self.fetch_tick(fetcher, 1)
+        self.fetch_tick(fetcher, 1, seconds=2.0)
+        self.align_state["aligned"] = True
+        self.fetch_tick(fetcher, 1)  # pickup replay starts
+        self.replaying["on"] = False
+        return self.fetch_tick(fetcher, 1)  # pickup replay finished
+
+    def test_fetch_then_delivers_to_the_marker(self):
+        fetcher = self.add_delivery(self.make_fetcher())
+        self.assertTrue(self.picked_up(fetcher))  # still busy: delivering
+        self.assertEqual(self.events[-1], ("marker", True, False))
+        self.assertIs(fetcher.active_aligner, self.marker)
+        self.assertFalse(fetcher.replaying)  # the marker aligner drives the legs
+        self.marker.phase = "aligned"
+        self.assertTrue(self.fetch_tick(fetcher, 1))
+        self.assertEqual(self.events[-2:], [("marker", False, False),
+                                            ("deliver-replay", {"name": "lower+place"})])
+        self.assertTrue(fetcher.replaying)
+        self.replaying["on"] = False
+        self.assertFalse(self.fetch_tick(fetcher, 1))
+        self.assertTrue(any("delivered" in entry for entry in self.log), self.log)
+
+    def test_delivery_stops_if_the_marker_cannot_be_lined_up(self):
+        fetcher = self.add_delivery(self.make_fetcher())
+        self.picked_up(fetcher)
+        self.marker.refuse = True  # the marker aligner gave up (reason logged by it)
+        self.assertFalse(self.fetch_tick(fetcher, 1))
+        self.assertTrue(any("could not line up with the marker" in e for e in self.log))
+        self.assertFalse(any("deliver-replay" in str(e) for e in self.events))
+
+    def test_delivery_cancelled_releases_the_marker_aligner(self):
+        fetcher = self.add_delivery(self.make_fetcher())
+        self.picked_up(fetcher)
+        self.assertFalse(self.fetch_tick(fetcher, 2))  # F again
+        self.assertEqual(self.events[-1], ("marker", False, False))
+        self.assertTrue(any("FETCH cancelled" in entry for entry in self.log))
+
+    def test_without_delivery_fetch_ends_after_the_pickup(self):
+        fetcher = self.make_fetcher()
+        self.assertFalse(self.picked_up(fetcher))
+        self.assertIs(fetcher.active_aligner, self.aligner)
+
     def test_fetch_stops_if_the_replay_cannot_start(self):
         fetcher = self.make_fetcher()
         self.teach.start_replay = lambda fetch=False: self.events.append("no recording")
@@ -813,7 +879,7 @@ class ReceiverTests(unittest.TestCase):
             legs=SimpleNamespace(step=lambda p, a: None, stop=lambda: None),
             pose=SimpleNamespace(prepare=lambda kneel, arm: None),
             observer=SimpleNamespace(begin=lambda t: None,
-                                     poll=lambda: ("lost", "no purple box in view")),
+                                     poll=lambda: ("stalled", "no fresh camera frame")),
             read_yaw=lambda: 0.0,
             reference=lambda: {"features": {"u": 0.5, "v": 0.6, "h": 0.2},
                                "state": {"kneel": 1.0, "arm": None}},
@@ -827,7 +893,7 @@ class ReceiverTests(unittest.TestCase):
             for _ in range(3):
                 aligner.clock.now += 0.05
                 fetcher.update(presses, False, True)
-        self.assertEqual(sum("box not in view" in entry for entry in log), 2, log)
+        self.assertEqual(sum("no fresh camera frame" in entry for entry in log), 2, log)
 
     def test_fetch_ends_when_alignment_gives_up(self):
         fetcher = self.make_fetcher()

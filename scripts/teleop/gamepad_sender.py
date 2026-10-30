@@ -35,7 +35,7 @@ RECEIVER_FLAGS = ("max-x", "max-y", "max-turn", "ramp", "ramp-start", "arm-speed
                   "stand-height", "kneel-time", "color", "settle", "min-sharpness", "record-fps",
                   "min-free-mb", "replay-settle", "replay-max-gap", "align-turn", "align-walk",
                   "tol-u", "tol-h", "tol-v", "align-max-moves", "align-max-seconds",
-                  "heading-gain", "heading-max", "heading-sign", "teach-dir")
+                  "heading-gain", "heading-max", "heading-sign", "teach-dir", "deliver")
 RECEIVER_SWITCHES = ("align-motion", "recalibrate", "no-heading-hold", "start-standing",
                      "record-motion-only")
 

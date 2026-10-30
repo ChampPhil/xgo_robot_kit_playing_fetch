@@ -398,11 +398,11 @@ class GyroAlignerTests(Harness):
         self.assertFalse(self.aligner.active)
         self.assertTrue(self.said("gyro"))
 
-    def test_box_not_in_view_at_the_start_aborts(self):
+    def test_box_not_in_view_at_the_start_starts_a_search(self):
         self.make(bearing=80.0)
-        self.run_until(10)
-        self.assertTrue(self.said("box not in view"))
-        self.assertEqual(self.robot.steps, [])
+        self.run_until(20, stop_when_aligned=False)
+        self.assertTrue(self.said("SEARCH: no box in view"), self.log)
+        self.assertTrue(self.said("looking around"), self.log)
 
     def test_release_manual_input_and_watchdog_stop_the_legs(self):
         for stop in ("release", "manual", "watchdog"):
@@ -522,13 +522,22 @@ class GyroAlignerTests(Harness):
         self.assertTrue(any(kneel < 1.0 for kneel, _ in self.pose.calls), self.pose.calls)
         self.assertEqual(self.pose.calls[-1][0], 1.0)  # aligned in the recording's pose
 
-    def test_box_in_no_posture_stops_after_trying_them(self):
+    def test_box_in_no_posture_stops_after_looking_all_around(self):
         self.make(visible=lambda kneel, d: False)
         self.calibrated()
-        self.run_until(30)
+        self.run_until(200)
         self.assertFalse(self.aligner.active)
-        self.assertEqual([kneel for kneel, _ in self.pose.calls], [1.0, 0.5, 0.0])
-        self.assertTrue(self.said("any posture"), self.log)
+        self.assertEqual([kneel for kneel, _ in self.pose.calls][:3], [1.0, 0.5, 0.0])
+        turns = [step for step in self.robot.steps if step[0] == "turn"]
+        self.assertEqual(len(turns), align.GyroAligner.SCAN_TURNS)
+        self.assertTrue(self.said("all around"), self.log[-3:])
+
+    def test_a_box_behind_the_robot_is_found_by_turning(self):
+        self.make(bearing=150.0, distance=0.4)
+        self.calibrated()
+        self.run_until(240)
+        self.assertEqual(self.aligner.phase, "aligned", self.log[-6:])
+        self.assertTrue(self.said("looking around"), self.log)
 
     def test_a_quarter_speed_step_with_a_small_size_change_is_not_a_failed_start(self):
         # final steps change the box size by ~4-5%; camera noise can read under 3%

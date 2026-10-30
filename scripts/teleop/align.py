@@ -149,13 +149,14 @@ class GyroAligner:
     MAX_BACKUPS = 3  # times the box may be lost to an overshoot before giving up
     KNEEL_LEVELS = (0.0, 0.5, 1.0)  # postures tried when the box is not in view
     MAX_SEARCH_MOVES = 8
+    SCAN_TURNS, SCAN_DEGREES = 7, 45.0  # then look around: 8 directions in all
     SEARCH_WALK = 1.5  # seconds toward a box only another posture can see
     SEARCH_CENTER = 0.1  # turn toward it first when it is this far off the target column
 
     def __init__(self, legs, pose, observer, read_yaw, reference, calibration_path, log, clock,
                  motion=False, recalibrate=False, settle=0.7, speeds=None, tol=None,
                  max_seconds=45.0, max_moves=25, prepare_settle=1.0, drift=None,
-                 gyro_sign_learned=None):
+                 gyro_sign_learned=None, target="box"):
         self.legs = legs
         self.pose = pose
         self.observer = observer
@@ -174,6 +175,7 @@ class GyroAligner:
         self.prepare_settle = prepare_settle
         self.drift = drift or (lambda: 0.0)  # gyro drift in deg/s (None until measured)
         self.gyro_sign_learned = gyro_sign_learned  # tell heading hold the checked direction
+        self.target = target  # what is aligned to, for messages ("box", "marker")
         self.active = False
         self.refused = False
         self.phase = None
@@ -240,7 +242,7 @@ class GyroAligner:
         # 2026-10-21): learned upwards when a walk leaves the box's size unchanged.
         self.walk_dead = self.DEAD
         self.backups, self.max_forward = 0, None
-        self.search_levels, self.search_moves = None, 0
+        self.search_levels, self.search_moves, self.scans = None, 0, 0
         self.phase = "initial"
         if self.motion:
             self.pose.prepare(state.get("kneel", 0.0), state.get("arm"))
@@ -385,10 +387,22 @@ class GyroAligner:
                                          if abs(level - kneel) > 1e-3),
                                         key=lambda level: abs(level - kneel))
         if not self.search_levels:
-            self.abort("box not in view in any posture")
+            if self.scans >= self.SCAN_TURNS:
+                self.abort("{} not in view in any posture, looking all around".format(
+                    self.target))
+                return
+            self.scans += 1
+            self.log("SEARCH: no {} in any posture; looking around: turn left {:.0f} deg "
+                     "({}/{})".format(self.target, self.SCAN_DEGREES, self.scans,
+                                       self.SCAN_TURNS))
+            self.pose.prepare(self.setup["kneel"] or 0.0, self.setup["arm"])
+            self.phase = "search_moved"  # back to the recording's posture after the turn
+            self.start_turn(self.SCAN_DEGREES, now)
+            self.last_move = None
             return
         level = self.search_levels.pop(0)
-        self.log("SEARCH: no box in view; looking from kneel {:.1f}...".format(level))
+        self.log("SEARCH: no {} in view; looking from kneel {:.1f}...".format(self.target,
+                                                                              level))
         self.pose.prepare(level, self.setup["arm"])
         self.phase = "search"
         self.observer.begin(now + self.prepare_settle)

@@ -23,6 +23,7 @@ import threading
 import time
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "sensor_monitor"))
 
@@ -105,6 +106,10 @@ def build_parser():
                         help="box colour for the recording reference (default: purple)")
     parser.add_argument("--teach-dir", default=str(Path.home() / "xgo_teach"),
                         help="where recordings are stored (default: ~/xgo_teach)")
+    parser.add_argument("--deliver", metavar="WORKCELL",
+                        help="after F picks a block up, line up with the stacking marker and put "
+                        "it down (a workcell with generated placements and a captured marker "
+                        "view, see scripts/stacking)")
     parser.add_argument("--record-motion-only", action="store_true",
                         help="X teaches routes without requiring a box; no video dataset or fetch reference")
     parser.add_argument(
@@ -279,8 +284,10 @@ def run(driver, lines, timeout, log=print, first=None, arm=None, barker=None, ra
                 # keep correcting walking drift (also replayed walks); alignment moves the legs
                 # itself, so its turns must not be measured as gyro drift
                 # (while it only looks, drift can still be measured)
+                mover = (getattr(fetcher, "active_aligner", aligner) if fetching
+                         else aligner)
                 driver.refresh(external_motion=aligning
-                               and getattr(aligner, "moving", True) is not None)
+                               and getattr(mover, "moving", True) is not None)
     finally:
         driver.stop()
         try:
@@ -427,8 +434,30 @@ def main(argv=None):
             max_seconds=args.align_max_seconds, max_moves=int(args.align_max_moves),
             drift=lambda: hold.bias, gyro_sign_learned=hold.adopt_sign)
         fullreset = FullReset(dog, driver, arm, posture, ramp, log)
+        delivery = None
+        if args.deliver:
+            import deliver as deliver_module
+
+            plan = deliver_module.load(args.deliver)
+            marker_aligner = align_module.GyroAligner(
+                legs=LegStepper(alignment_legs_driver(driver), speeds),
+                pose=PosePreparer(arm, posture),
+                observer=align_module.Observer(
+                    cam, deliver_module.marker_measure(plan["marker_id"]),
+                    teach_module.laplacian_sharpness, time.monotonic,
+                    min_sharpness=args.min_sharpness),
+                read_yaw=heading.make_yaw_reader(dog.ser),
+                reference=lambda: plan["reference"],
+                calibration_path=teach_dir / "calibration.json", log=log, clock=time.monotonic,
+                motion=args.align_motion, settle=args.settle, speeds=speeds,
+                tol=deliver_module.TOLERANCE, max_seconds=args.align_max_seconds,
+                max_moves=int(args.align_max_moves), drift=lambda: hold.bias,
+                gyro_sign_learned=hold.adopt_sign, target="marker")
+            delivery = SimpleNamespace(aligner=marker_aligner, motion=plan["motion"])
+            log("Delivery on: after a pickup, F lines up with the marker and puts the block "
+                "down.")
         fetcher = Fetcher(fullreset, aligner, controller, log, time.monotonic,
-                          motion=args.align_motion)
+                          motion=args.align_motion, deliver=delivery)
         try:
             run(driver, lines, args.timeout, log, first=first, arm=arm, barker=Barker(log=log),
                 ramp=ramp, posture=posture, teach=controller,

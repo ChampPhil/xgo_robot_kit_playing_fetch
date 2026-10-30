@@ -152,6 +152,18 @@ without a video dataset; set an explicit arm pose first. Such recordings cannot 
 automatic F/Space alignment targets. See [the stacking guide](../stacking/README.md) for named
 routes, stationary verification poses, and separate 0/25/50 mm placement recordings.
 
+## Fetch and deliver to the marker (`--deliver`)
+
+With `--deliver ~/xgo_teach/stacking/workcell.json` (placements generated and the marker view
+captured, see [the stacking guide](../stacking/README.md)), F continues after the pickup: with
+the block held up out of view it looks for the printed marker (other kneel levels, then turning
+45° at a time all around), lines up with the captured marker view, lowers the block in small
+steps (one jump flung it), does the pickup's reach, opens the claw and retreats. Blocks must be
+square to the robot for now; a rotated block is not detected and the grab misses.
+
+When alignment cannot see its target in any kneel level it now also turns 45° at a time, up to
+a full circle, before giving up (pickups too).
+
 ## Aligning with the box (hold A, or F = fetch)
 
 Alignment moves the robot back to where the latest recording's first frame was taken, so the
