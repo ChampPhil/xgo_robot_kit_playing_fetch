@@ -1,0 +1,4 @@
+openwakeword>=0.6.0
+openai-whisper>=20231117
+sounddevice>=0.4.6
+soundfile>=0.12

@@ -4,7 +4,7 @@ This repository develops an XGO Lite robot that fetches colored blocks and, even
 stacks them in a requested order. Single-box teach-and-repeat pickup has worked on hardware.
 The new three-box stacking workflow is implemented and tested offline; its carry/place
 motions and verification views still need teaching before a physical tower run.
-Current evidence and open work are in [docs/PROGRESS.md](docs/PROGRESS.md).
+Current evidence and open work are in [docs/PROGRESS.md](docs/PROGRESS.md). A 30 October snapshot of what the robot can do is in [docs/Current Robot 10-30-26.md](docs/Current%20Robot%2010-30-26.md); the quarter recap is [docs/Breakdown of Existing Progress.md](docs/Breakdown%20of%20Existing%20Progress.md).
 
 ## Getting started
 
@@ -14,6 +14,7 @@ From the repository root, `./setup.sh` creates `.venv/` and installs `requiremen
 - [Movement tests](scripts/movement_tests/README.md) — explicit, timed movement CLI; commands motors only after confirmation.
 - [Sensor monitor](scripts/sensor_monitor/README.md) — live, read-only UART telemetry (battery, attitude, joints) in the terminal; requires the built-in menu to release the serial port.
 - [Teleop and pickup](scripts/teleop/README.md) — gamepad/keyboard, recording, alignment and fetch.
+- [Voice commands](scripts/voice/README.md) — say **hey jarvis**, then one motion or preset action (openWakeWord + Whisper).
 - [Three-box stacking](scripts/stacking/README.md) — multi-box tracking, input color order,
   bounded retries, grip/tower verification, printed marker, simulation and taught-workcell execution.
 
