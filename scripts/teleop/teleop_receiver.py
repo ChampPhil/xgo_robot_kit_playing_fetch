@@ -418,7 +418,8 @@ def main(argv=None):
         import align as align_module
 
         teach_dir = Path(args.teach_dir).expanduser()
-        speeds = {"turn": int(args.align_turn), "forward": int(args.align_walk)}
+        speeds = {"turn": int(args.align_turn), "forward": int(args.align_walk),
+                  "strafe": int(args.max_y)}  # close to the box: side steps, not turns
         measure = alignment_measure(args.color)
         aligner = align_module.GyroAligner(
             legs=LegStepper(alignment_legs_driver(driver), speeds),
