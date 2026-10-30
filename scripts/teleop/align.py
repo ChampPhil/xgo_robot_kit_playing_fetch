@@ -23,7 +23,11 @@ from teach import write_json_atomic
 CALIBRATION_VERSION = 2
 # Between the 2026-10-23 rule (4% / 8%: always tried, one partial grab) and the 2026-10-26 one
 # (2% / 4% on every frame: often never finished, the gait lands within about +-4 mm at random).
-DEFAULT_TOL = {"u": 0.03, "h": 0.06, "v": 0.04}
+# h_far: the box may look at most this much too small (the robot too far). Every grab accepted
+# on the short side (-0.029 .. -0.059) caught the edge, slipped or missed; clean ones were at
+# -0.017 and +0.000. The recorded grab is at the arm's reach limit, so short cannot be made up.
+DEFAULT_TOL = {"u": 0.03, "h": 0.06, "h_far": 0.02, "v": 0.04}
+AIM_H = 0.015  # walk toward a box this much bigger than the reference: err on the close side
 NEAR = 0.15  # combined error below which the robot is close: no "error grew" stop there
 
 
@@ -34,8 +38,10 @@ def errors(features, reference):
 
 
 def within(error, tol):
-    """True when the driven errors (eu, eh) are inside tolerance; ev is checked separately."""
-    return abs(error[0]) <= tol["u"] and abs(error[1]) <= tol["h"]
+    """True when the driven errors (eu, eh) are inside tolerance; ev is checked separately.
+    eh may go down to -tol["h_far"] (too far) and up to tol["h"] (too close)."""
+    return (abs(error[0]) <= tol["u"]
+            and -tol.get("h_far", tol["h"]) <= error[1] <= tol["h"])
 
 
 def walk_seconds(h, h_target, rate):
@@ -171,7 +177,7 @@ class GyroAligner:
         self.recalibrate = recalibrate
         self.settle = settle
         self.speeds = speeds or {"turn": 40, "forward": 12}
-        self.tol = dict(DEFAULT_TOL if tol is None else tol)
+        self.tol = dict(DEFAULT_TOL, **(tol or {}))
         self.max_seconds = max_seconds
         self.max_moves = max_moves
         self.prepare_settle = prepare_settle
@@ -663,7 +669,7 @@ class GyroAligner:
             seconds = 1.0 if self.max_forward is None or eh > 0 else min(1.0, self.max_forward)
             amount = 1.0 if seconds >= self.MIN_WALK * 2 else self.FINE_AMOUNT
             return (1 if eh < 0 else -1), max(self.MIN_WALK, seconds / amount), amount
-        needed = walk_seconds(h, self.ref["h"], self.walk_rate)
+        needed = walk_seconds(h, self.ref["h"] * (1 + AIM_H), self.walk_rate)
         direction = 1 if needed > 0 else -1
         seconds = abs(needed) * 0.9  # undershoot slightly; the next look corrects
         if direction > 0 and self.max_forward is not None:

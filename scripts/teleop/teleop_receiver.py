@@ -153,7 +153,9 @@ def build_parser():
             ("tol-u", DEFAULT_TOL["u"], 0.01, 0.2,
              "aligned when the box centre is this close (image width)"),
             ("tol-h", DEFAULT_TOL["h"], 0.02, 0.3,
-             "aligned when the box size is this close (fraction)"),
+             "aligned when the box looks at most this much too big (fraction)"),
+            ("tol-h-far", DEFAULT_TOL["h_far"], 0.0, 0.3,
+             "aligned only if the box looks at most this much too small (too far)"),
             ("tol-v", DEFAULT_TOL["v"], 0.01, 0.2,
              "allowed vertical difference before 'view mismatch'"),
             ("align-max-moves", 25, 5, 100, "give up after this many alignment moves"),
@@ -430,7 +432,8 @@ def main(argv=None):
                                           measure),
             calibration_path=teach_dir / "calibration.json", log=log, clock=time.monotonic,
             motion=args.align_motion, recalibrate=args.recalibrate, settle=args.settle,
-            speeds=speeds, tol={"u": args.tol_u, "h": args.tol_h, "v": args.tol_v},
+            speeds=speeds, tol={"u": args.tol_u, "h": args.tol_h, "h_far": args.tol_h_far,
+                                "v": args.tol_v},
             max_seconds=args.align_max_seconds, max_moves=int(args.align_max_moves),
             drift=lambda: hold.bias, gyro_sign_learned=hold.adopt_sign)
         fullreset = FullReset(dog, driver, arm, posture, ramp, log)
