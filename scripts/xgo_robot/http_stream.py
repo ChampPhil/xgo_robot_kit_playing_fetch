@@ -3,7 +3,10 @@ MJPEG HTTP server and the newest-JPEG mailbox.
 
 Purpose:
     The Pi has no display over SSH. This module serves ``/`` (HTML + stats
-    panel), ``/stream`` (multipart JPEGs), and ``/stats`` (JSON telemetry).
+    panel), ``/stream`` (multipart JPEGs), ``/stats`` (JSON telemetry), and
+    ``POST /command`` (walk/yaw speeds from the laptop's ``tello_xgo_bridge``,
+    applied through a ``CommandWatchdog`` that stops the dog if the laptop
+    goes quiet for 1 s).
     ``LiveHub`` holds only the latest JPEG so a slow browser skips frames
     instead of stalling the camera.
 
@@ -27,6 +30,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 
 from .models import JPEG_QUALITY, MJPEG_BOUNDARY, PAGE_HTML
+from .remote_command import CommandWatchdog, parse_remote_command
+
+MAX_COMMAND_BYTES = 4096
 
 
 class LiveHub:
@@ -91,6 +97,51 @@ class StreamHandler(BaseHTTPRequestHandler):
     hub: LiveHub | None = None
     stop: threading.Event | None = None
     telemetry: object | None = None
+    watchdog: CommandWatchdog | None = None
+
+    def do_POST(self) -> None:
+        """Answer ``POST /command`` with ``{"walk": speed, "yaw": speed}``.
+
+        :returns: None.
+        """
+
+        if self.path.split("?", 1)[0] != "/command":
+            self._write_json(404, {"ok": False, "error": "Only POST /command is supported."})
+            return
+        if self.watchdog is None or self.telemetry is None:
+            self._write_json(503, {"ok": False, "error": "Telemetry is off, so commands are "
+                                                         "disabled (drop --no-telemetry)."})
+            return
+        if not self.telemetry.snapshot().get("ok"):
+            self._write_json(503, {"ok": False, "error": "The dog isn't connected yet."})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= MAX_COMMAND_BYTES:
+                raise ValueError("Body missing or too large.")
+            parsed = parse_remote_command(json.loads(self.rfile.read(length).decode("utf-8")))
+        except ValueError as exc:  # also covers bad JSON
+            self._write_json(400, {"ok": False, "error": str(exc)})
+            return
+        self.watchdog.command(parsed)
+        self._write_json(200, {"ok": True, "stop": parsed.stop, "walk": parsed.walk,
+                               "yaw": parsed.yaw, "watchdog_s": self.watchdog.timeout})
+
+    def _write_json(self, status: int, payload: dict) -> None:
+        """Send one JSON reply.
+
+        :param status: HTTP status code.
+        :param payload: JSON-serializable dict.
+        :returns: None.
+        """
+
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self) -> None:
         """Answer ``/``, ``/stream``, and ``/stats``.
@@ -214,6 +265,11 @@ def start_http_server(
     StreamHandler.hub = hub
     StreamHandler.stop = stop
     StreamHandler.telemetry = telemetry
+    StreamHandler.watchdog = None
+    if telemetry is not None and hasattr(telemetry, "command"):
+        # Remote walk/yaw commands go through the telemetry serial lock; the
+        # watchdog stops the dog if the laptop stops sending them.
+        StreamHandler.watchdog = CommandWatchdog(telemetry.command).start()
     try:
         server = CameraHTTPServer((bind, port), StreamHandler)
     except OSError as exc:
